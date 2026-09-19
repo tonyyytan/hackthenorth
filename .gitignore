@@ -133,3 +133,7 @@ faces/*
 !faces/testuser/
 !faces/thor.jpg
 !faces/loki.jpg
+
+# Roster + research is built locally: python seed_profiles.py, then node server/research.js
+people.db
+judges.txt

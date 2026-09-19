@@ -102,9 +102,15 @@ namespace HackTheNorth.Identity
             }
         }
 
+        // The web-research opener fills the box from the first frame; once the conversation
+        // insight exists it takes over, since it knows what you're actually talking about.
+        // ponytail: research summary stays off the box (~50 words is too long to read in AR);
+        // it still reaches the insight via the profile brain.py is given.
         private static string Body(Face f) => string.Join("\n", new[]
         {
-            f.profile?.role, f.insight?.topic, f.insight?.suggested_question,
+            f.profile?.role,
+            f.insight?.topic,
+            string.IsNullOrEmpty(f.insight?.suggested_question) ? f.profile?.opener : f.insight.suggested_question,
         }.Where(s => !string.IsNullOrEmpty(s)));
 
         // Measured from the camera's own rays, so it stays right whatever resolution is picked.
@@ -122,7 +128,7 @@ namespace HackTheNorth.Identity
             public Profile profile;
             public Insight insight;
         }
-        [Serializable] private class Profile { public string name, role, bio, links, working_on, looking_for; }
+        [Serializable] private class Profile { public string name, role, bio, links, working_on, looking_for, research, opener; }
         [Serializable] private class Insight { public string topic, shared_interest, suggested_question; }
     }
 }

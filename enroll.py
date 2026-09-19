@@ -45,7 +45,10 @@ def db():
 def save_profile(pid, values):
     con = db()
     cols = ", ".join(FIELDS)
-    con.execute(f"INSERT OR REPLACE INTO people (id, {cols}) VALUES (?{', ?' * len(FIELDS)})",
+    # Upsert, not INSERT OR REPLACE: a replace drops columns research.js added (research, opener).
+    updates = ", ".join(f"{f} = excluded.{f}" for f in FIELDS)
+    con.execute(f"INSERT INTO people (id, {cols}) VALUES (?{', ?' * len(FIELDS)}) "
+                f"ON CONFLICT(id) DO UPDATE SET {updates}",
                 [pid] + [values.get(f, "") or "" for f in FIELDS])
     con.commit()
     con.close()
