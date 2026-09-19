@@ -4,11 +4,15 @@ Transcript goes in, {topic, shared_interest, suggested_question} comes out some
 seconds later. Callers read the last cached answer, which may be stale or empty
 -- a panel showing yesterday's topic beats a panel that blanks mid-conversation.
 
-Providers, all through the one `openai` client (every one is OpenAI-compatible):
+Providers:
     OMNI_API_KEY=...     the insight brain: photo + voice + text in one call (Huawei OMNI
                          via yibuapi). OMNI_MODEL / OMNI_BASE_URL override the defaults.
-    OPENAI_API_KEY=sk-.. speech-to-text for /utterance audio, and the text-only brain
-                         when OMNI is unset or failing. LLM_MODEL / LLM_BASE_URL override.
+    ANTHROPIC_API_KEY=.. fallback brain when OMNI is unset or failing: Claude, photo + text
+                         (+ ANTHROPIC_WORKSPACE_ID). Read from server/.env. LLM_MODEL overrides.
+    Transcripts normally arrive as text from the Quest (AssemblyAI streaming in Unity).
+    STT_API_KEY=...      only for raw /utterance audio: any OpenAI-compatible /audio/transcriptions,
+    STT_BASE_URL=...     e.g. Groq's free tier: https://api.groq.com/openai/v1
+    STT_MODEL=...                                   with STT_MODEL=whisper-large-v3-turbo
 
     python brain.py      # self-check, runs without a key
 """
@@ -19,6 +23,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 FIRE_EVERY = 4        # utterances
 FIRE_AFTER = 15.0     # seconds, whichever comes first
@@ -54,24 +59,38 @@ _lock = threading.Lock()
 _pool = ThreadPoolExecutor(max_workers=2)
 
 
-def _client():
-    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+def _load_server_env():
+    """server/.env (research.js's keys) -> os.environ, so the Anthropic key lives in one file."""
+    env = Path(__file__).parent / "server" / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() and not k.startswith("#"):
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_server_env()
+
+
+def _ask(prompt, image=None):
+    """Fallback brain: Claude, text + the person's photo (Claude can't take audio; OMNI can)."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return None
-    from openai import OpenAI
-    return OpenAI(api_key=key, base_url=os.environ.get("LLM_BASE_URL") or None)
-
-
-def _ask(prompt):
-    client = _client()
-    if client is None:
-        return None
-    r = client.chat.completions.create(
-        model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4, max_tokens=200,
+    import anthropic
+    ws = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    client = anthropic.Anthropic(api_key=key, default_headers={"anthropic-workspace-id": ws} if ws else None)
+    content = [{"type": "text", "text": prompt}]
+    if image:
+        content.insert(0, {"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(image).decode()}})
+    r = client.messages.create(
+        model=os.environ.get("LLM_MODEL", "claude-sonnet-5"), max_tokens=300,
+        # a 3-field JSON reply needs no reasoning; thinking only adds latency to the caption
+        thinking={"type": "disabled"},
+        messages=[{"role": "user", "content": content}],
     )
-    return r.choices[0].message.content
+    return "".join(b.text for b in r.content if b.type == "text")
 
 
 def omni_content(prompt, image=None, audio=None):
@@ -102,11 +121,11 @@ def _ask_omni(prompt, image, audio):
 
 def transcribe(wav):
     """Speech-to-text via OpenAI. Blocking (~0.5-1s): call from a worker thread."""
-    key = os.environ.get("OPENAI_API_KEY")
+    key = os.environ.get("STT_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not key or not wav:
         return ""
     from openai import OpenAI
-    return OpenAI(api_key=key).audio.transcriptions.create(
+    return OpenAI(api_key=key, base_url=os.environ.get("STT_BASE_URL") or None).audio.transcriptions.create(
         model=STT_MODEL, file=("utterance.wav", wav)).text.strip()
 
 
@@ -137,7 +156,7 @@ def _work(pid, prompt):
             got = parse(_ask_omni(prompt, image, audio))
         except Exception:
             got = None                                # OMNI down / out of credits
-        got = got or parse(_ask(prompt))
+        got = got or parse(_ask(prompt, image))
         if got:
             with _lock:
                 _cache[pid] = got

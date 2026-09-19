@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace HackTheNorth.Speech
 {
@@ -14,9 +15,9 @@ namespace HackTheNorth.Speech
     /// SubmitAudio (e.g. from MicCapture); OnTranscript fires on every "Turn" message from the
     /// server, with isFinal = the server's end_of_turn flag.
     ///
-    /// API key: set the ASSEMBLYAI_API_KEY environment variable (preferred — never gets
-    /// committed) or the apiKeyFallback field in the Inspector (only for local testing; do NOT
-    /// commit a real key typed into a scene/prefab).
+    /// Auth, first that works: the ASSEMBLYAI_API_KEY env var (editor), a single-use token from
+    /// server.py /stt-token via tokenServer (Quest: Android apps get no env vars, and this keeps
+    /// the key out of the APK), or the apiKeyFallback field (never commit a real key in it).
     ///
     /// NOT verified against a live AssemblyAI account in this session (no API key available) —
     /// this implements the protocol exactly as documented as of the research done for this
@@ -30,6 +31,8 @@ namespace HackTheNorth.Speech
     {
         [Tooltip("Prefer the ASSEMBLYAI_API_KEY environment variable instead — this field is serialized into the scene/prefab and would leak into git if committed with a real key.")]
         [SerializeField] private string apiKeyFallback = "";
+        [Tooltip("On the Quest: server.py hands out single-use tokens at /stt-token, so no key ships in the build.")]
+        [SerializeField] private HackTheNorth.Identity.FaceIdClient tokenServer;
         [SerializeField] private int sampleRate = 16000;
         [SerializeField] private bool formatTurns = true;
         [Tooltip("min_latency prioritizes real-time responsiveness over transcription accuracy — right for a live voice-query use case.")]
@@ -74,31 +77,49 @@ namespace HackTheNorth.Speech
             _ = DisconnectAsync();
         }
 
-        private string ResolveApiKey()
+        // Tokens are single-use, so every (re)connect fetches a fresh one.
+        private async Task<string> FetchServerToken()
         {
-            string envKey = Environment.GetEnvironmentVariable("ASSEMBLYAI_API_KEY");
-            return !string.IsNullOrEmpty(envKey) ? envKey : apiKeyFallback;
+            if (tokenServer == null) return null;
+            using var req = UnityWebRequest.Get($"{tokenServer.ServerUrl}/stt-token");
+            var op = req.SendWebRequest();
+            while (!op.isDone) await Task.Yield();
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogWarning($"AssemblyAiStreamingSpeechToText: /stt-token failed: {req.error}");
+                return null;
+            }
+            var res = JsonUtility.FromJson<TokenResponse>(req.downloadHandler.text);
+            if (!string.IsNullOrEmpty(res.error)) Debug.LogWarning($"AssemblyAiStreamingSpeechToText: {res.error}");
+            return res.token;
         }
+
+        [Serializable] private class TokenResponse { public string token, error; }
 
         private async Task ConnectAsync()
         {
             if (isConnecting || (socket != null && socket.State == WebSocketState.Open)) return;
             isConnecting = true;
 
-            string apiKey = ResolveApiKey();
-            if (string.IsNullOrEmpty(apiKey))
+            // Editor: env var key. Quest: no env vars on Android, so ask server.py for a
+            // single-use token (the real key never ships in the APK). Last resort: the field.
+            string apiKey = Environment.GetEnvironmentVariable("ASSEMBLYAI_API_KEY");
+            string token = string.IsNullOrEmpty(apiKey) ? await FetchServerToken() : null;
+            if (string.IsNullOrEmpty(apiKey) && string.IsNullOrEmpty(token)) apiKey = apiKeyFallback;
+            if (string.IsNullOrEmpty(apiKey) && string.IsNullOrEmpty(token))
             {
-                Debug.LogWarning("AssemblyAiStreamingSpeechToText: no API key set (ASSEMBLYAI_API_KEY env var or apiKeyFallback field). Not connecting.");
+                Debug.LogWarning("AssemblyAiStreamingSpeechToText: no API key or server token (ASSEMBLYAI_API_KEY env var, tokenServer, or apiKeyFallback). Not connecting.");
                 isConnecting = false;
                 return;
             }
 
             cts = new CancellationTokenSource();
             socket = new ClientWebSocket();
-            socket.Options.SetRequestHeader("Authorization", apiKey);
+            if (string.IsNullOrEmpty(token)) socket.Options.SetRequestHeader("Authorization", apiKey);
 
             string url = $"wss://streaming.assemblyai.com/v3/ws?sample_rate={sampleRate}&encoding=pcm_s16le&format_turns={(formatTurns ? "true" : "false")}&mode={mode}";
             if (!string.IsNullOrEmpty(speechModel)) url += $"&speech_model={speechModel}";
+            if (!string.IsNullOrEmpty(token)) url += $"&token={Uri.EscapeDataString(token)}";
 
             try
             {

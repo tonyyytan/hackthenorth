@@ -133,18 +133,33 @@ namespace HackTheNorth.EditorTools
             so.FindProperty("spawner").objectReferenceValue = spawner;
             so.ApplyModifiedPropertiesWithoutUndo();
 
-            // Swap the voice pipeline's stub STT/LLM for server.py (OpenAI STT -> OMNI insight).
+            // Voice -> server.py: keep AssemblyAI streaming STT when the scene has it (transcripts
+            // go to /utterance as text); otherwise fall back to ServerSpeechToText (raw audio).
             var pipeline = Object.FindAnyObjectByType<CaptionPipeline>(FindObjectsInactive.Include);
             if (pipeline != null)
             {
-                if (!pipeline.TryGetComponent(out ServerSpeechToText stt)) stt = pipeline.gameObject.AddComponent<ServerSpeechToText>();
-                var sttSo = new SerializedObject(stt);
-                sttSo.FindProperty("faceIdClient").objectReferenceValue = client;
-                sttSo.ApplyModifiedPropertiesWithoutUndo();
+                var streaming = Object.FindAnyObjectByType<AssemblyAiStreamingSpeechToText>(FindObjectsInactive.Include);
+                MonoBehaviour stt = streaming;
+                if (streaming != null)
+                {
+                    var streamingSo = new SerializedObject(streaming);
+                    streamingSo.FindProperty("tokenServer").objectReferenceValue = client; // key-free auth on the Quest
+                    streamingSo.ApplyModifiedPropertiesWithoutUndo();
+                }
+                else
+                {
+                    if (!pipeline.TryGetComponent(out ServerSpeechToText serverStt)) serverStt = pipeline.gameObject.AddComponent<ServerSpeechToText>();
+                    var sttSo = new SerializedObject(serverStt);
+                    sttSo.FindProperty("faceIdClient").objectReferenceValue = client;
+                    sttSo.ApplyModifiedPropertiesWithoutUndo();
+                    stt = serverStt;
+                }
+                stt.enabled = true;
 
                 var pipelineSo = new SerializedObject(pipeline);
                 pipelineSo.FindProperty("speechToTextSource").objectReferenceValue = stt;
                 pipelineSo.FindProperty("llmClientSource").objectReferenceValue = null;
+                pipelineSo.FindProperty("faceIdClient").objectReferenceValue = client;
                 pipelineSo.ApplyModifiedPropertiesWithoutUndo();
                 pipeline.Rebind();
                 EditorUtility.SetDirty(pipeline.gameObject);

@@ -1,8 +1,12 @@
+using System.Collections;
+using System.Text;
 using HackTheNorth.Audio;
+using HackTheNorth.Identity;
 using HackTheNorth.LLM;
 using HackTheNorth.Speech;
 using HackTheNorth.UI;
 using UnityEngine;
+using UnityEngine.Networking;
 using UnityEngine.Serialization;
 
 namespace HackTheNorth.Pipeline
@@ -24,6 +28,8 @@ namespace HackTheNorth.Pipeline
         [FormerlySerializedAs("llmClient")]
         [SerializeField] private MonoBehaviour llmClientSource;
         [SerializeField] private SpeakerCaptionBox captionBox;
+        [Tooltip("Optional. When set, final transcripts are sent to server.py /utterance for the per-person insight.")]
+        [SerializeField] private FaceIdClient faceIdClient;
 
         private ISpeechToText SpeechToText => speechToTextSource as ISpeechToText;
         private ILlmClient LlmClient => llmClientSource as ILlmClient;
@@ -76,9 +82,31 @@ namespace HackTheNorth.Pipeline
 
             captionBox.ShowDialogue("You said", transcript);
 
+            // Finished sentences go to server.py, which files them under whoever is biggest in
+            // frame and feeds that person's insight (OMNI, else Claude); the insight shows up in
+            // their caption box on the next /id. ServerSpeechToText already posted its own audio.
+            if (faceIdClient != null && !(SpeechToText is ServerSpeechToText))
+                StartCoroutine(PostUtterance(transcript));
+
             // Wiring point: once the segmentation-anchoring system exists, route this to the
             // specific TrackedTarget's caption box instead of the single fixed captionBox.
             LlmClient?.Query(transcript, result => captionBox.UpdateMessage(result));
         }
+
+        private IEnumerator PostUtterance(string text)
+        {
+            // No person_id: the server uses whoever is biggest in the latest frame.
+            string body = JsonUtility.ToJson(new Utterance { text = text });
+            using var req = new UnityWebRequest($"{faceIdClient.ServerUrl}/utterance", "POST")
+            {
+                uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body)) { contentType = "application/json" },
+                downloadHandler = new DownloadHandlerBuffer(),
+            };
+            yield return req.SendWebRequest();
+            if (req.result != UnityWebRequest.Result.Success)
+                Debug.LogWarning($"CaptionPipeline: /utterance failed: {req.error}");
+        }
+
+        [System.Serializable] private class Utterance { public string text; }
     }
 }
