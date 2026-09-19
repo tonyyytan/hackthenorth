@@ -13,11 +13,13 @@ namespace HackTheNorth.Pipeline
     public class CaptionPipeline : MonoBehaviour
     {
         [SerializeField] private MicCapture micCapture;
-        [SerializeField] private StubSpeechToText speechToText;
+        [Tooltip("Any ISpeechToText: StubSpeechToText or ServerSpeechToText.")]
+        [SerializeField] private MonoBehaviour speechToText;
+        [Tooltip("Optional. Leave empty with ServerSpeechToText: the server's OMNI insight lands via FaceIdClient.")]
         [SerializeField] private StubLlmClient llmClient;
         [SerializeField] private SpeakerCaptionBox captionBox;
 
-        private ISpeechToText SpeechToText => speechToText;
+        private ISpeechToText SpeechToText => speechToText as ISpeechToText;
         private ILlmClient LlmClient => llmClient;
         private bool isBound;
 
@@ -60,7 +62,7 @@ namespace HackTheNorth.Pipeline
 
             // Wiring point: once the segmentation-anchoring system exists, route this to the
             // specific TrackedTarget's caption box instead of the single fixed captionBox.
-            LlmClient.Query(transcript, result => captionBox.UpdateMessage(result));
+            if (llmClient != null) LlmClient.Query(transcript, result => captionBox.UpdateMessage(result));
         }
     }
 }

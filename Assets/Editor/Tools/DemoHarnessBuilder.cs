@@ -126,6 +126,23 @@ namespace HackTheNorth.EditorTools
             so.FindProperty("spawner").objectReferenceValue = spawner;
             so.ApplyModifiedPropertiesWithoutUndo();
 
+            // Swap the voice pipeline's stub STT/LLM for server.py (OpenAI STT -> OMNI insight).
+            var pipeline = Object.FindAnyObjectByType<CaptionPipeline>(FindObjectsInactive.Include);
+            if (pipeline != null)
+            {
+                if (!pipeline.TryGetComponent(out ServerSpeechToText stt)) stt = pipeline.gameObject.AddComponent<ServerSpeechToText>();
+                var sttSo = new SerializedObject(stt);
+                sttSo.FindProperty("faceIdClient").objectReferenceValue = client;
+                sttSo.ApplyModifiedPropertiesWithoutUndo();
+
+                var pipelineSo = new SerializedObject(pipeline);
+                pipelineSo.FindProperty("speechToText").objectReferenceValue = stt;
+                pipelineSo.FindProperty("llmClient").objectReferenceValue = null;
+                pipelineSo.ApplyModifiedPropertiesWithoutUndo();
+                pipeline.Rebind();
+                EditorUtility.SetDirty(pipeline.gameObject);
+            }
+
             EditorUtility.SetDirty(go);
             EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
             EditorSceneManager.SaveOpenScenes();

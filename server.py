@@ -10,6 +10,7 @@ The filename/foldername is the canonical person id everywhere in the system.
 
 Run: python server.py
 """
+import base64
 import math
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ import numpy as np
 import badge
 import brain
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 
 warnings.filterwarnings("ignore")
 from insightface.app import FaceAnalysis
@@ -149,6 +151,17 @@ def badge_roster():
 # ponytail: one wearer, one camera, so a module-level track list is enough.
 # IOU across frames; if fast head turns break the association, upgrade to CSRT here.
 TRACKS = []  # [{bbox, name, score, last_embedded}]
+PHOTOS = {}  # pid -> latest face+name-tag crop (BGR), the image OMNI sees
+FOCUS = None  # pid of the biggest named face in the latest frame: who you're talking to
+
+
+def upper_body(img, bbox):
+    """Face plus the name tag below it, so OMNI sees both."""
+    x1, y1, x2, y2 = bbox
+    w, h = x2 - x1, y2 - y1
+    H, W = img.shape[:2]
+    return img[max(0, y1 - h // 2):min(H, y2 + int(2.6 * h)),
+               max(0, x1 - w):min(W, x2 + w)].copy()
 
 
 def identify(jpeg, frame_id, hfov):
@@ -198,6 +211,11 @@ def identify(jpeg, frame_id, hfov):
                 badge.identify_badge, img.copy(), t["bbox"], badge_roster())
 
     TRACKS[:] = fresh
+    global FOCUS
+    named = [t for t in fresh if t["name"] or t["badge"]]  # fresh is biggest-first
+    FOCUS = (named[0]["name"] or named[0]["badge"]) if named else FOCUS
+    for t in named:
+        PHOTOS[t["name"] or t["badge"]] = upper_body(img, t["bbox"])
     t_end = time.perf_counter()
     return {
         "frame_id": frame_id,
@@ -229,11 +247,22 @@ async def post_id(request: Request, frame_id: int = -1, hfov: float = DEFAULT_HF
 
 @api.post("/utterance")
 async def utterance(msg: dict):
-    """From the Pi: {"type":"speech","person_id":"alana-goyal","text":"..."}.
-    Returns immediately -- any LLM call runs in the background."""
-    pid = msg.get("person_id")
-    fired = brain.add_utterance(pid, msg.get("text", ""), PROFILES.get(pid))
-    return {"ok": True, "fired": fired, "insight": brain.get(pid)}
+    """{"person_id": "alana-goyal", "text": "..."} from the Pi, or {"audio_b64": <wav>}
+    from the Quest mic. person_id defaults to whoever is biggest in frame (FOCUS);
+    audio without text is transcribed by OpenAI. The insight call runs in the
+    background -- only the transcription is waited on."""
+    pid = msg.get("person_id") or FOCUS
+    audio = base64.b64decode(msg["audio_b64"]) if msg.get("audio_b64") else None
+    text = msg.get("text") or ""
+    if audio and not text:
+        try:
+            text = await run_in_threadpool(brain.transcribe, audio)
+        except Exception as e:
+            return {"ok": False, "person_id": pid, "text": "", "error": f"stt: {e}"}
+    photo = PHOTOS.get(pid)
+    image = cv2.imencode(".jpg", photo)[1].tobytes() if photo is not None and photo.size else None
+    fired = brain.add_utterance(pid, text, PROFILES.get(pid), image=image, audio=audio)
+    return {"ok": True, "person_id": pid, "text": text, "fired": fired, "insight": brain.get(pid)}
 
 
 @api.post("/reload")
@@ -243,6 +272,7 @@ async def reload():
     NAMES, GALLERY, OWNER = enroll()
     PROFILES = load_profiles()
     TRACKS.clear()
+    PHOTOS.clear()
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
 
 

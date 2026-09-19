@@ -4,13 +4,15 @@ Transcript goes in, {topic, shared_interest, suggested_question} comes out some
 seconds later. Callers read the last cached answer, which may be stale or empty
 -- a panel showing yesterday's topic beats a panel that blanks mid-conversation.
 
-Config (either works, one client):
-    OPENAI_API_KEY=sk-...
-    GEMINI_API_KEY=...   LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-                         LLM_MODEL=gemini-2.0-flash
+Providers, all through the one `openai` client (every one is OpenAI-compatible):
+    OMNI_API_KEY=...     the insight brain: photo + voice + text in one call (Huawei OMNI
+                         via yibuapi). OMNI_MODEL / OMNI_BASE_URL override the defaults.
+    OPENAI_API_KEY=sk-.. speech-to-text for /utterance audio, and the text-only brain
+                         when OMNI is unset or failing. LLM_MODEL / LLM_BASE_URL override.
 
     python brain.py      # self-check, runs without a key
 """
+import base64
 import json
 import os
 import threading
@@ -22,6 +24,9 @@ FIRE_EVERY = 4        # utterances
 FIRE_AFTER = 15.0     # seconds, whichever comes first
 KEEP_LINES = 12       # transcript lines sent as context
 FIELDS = ("topic", "shared_interest", "suggested_question")
+OMNI_BASE_URL = os.environ.get("OMNI_BASE_URL", "https://yibuapi.com/v1")
+OMNI_MODEL = os.environ.get("OMNI_MODEL", "qwen3-omni-flash")  # check yibuapi's model list
+STT_MODEL = os.environ.get("STT_MODEL", "gpt-4o-mini-transcribe")
 
 PROMPT = """You are helping someone at a hackathon talk to {name}.
 
@@ -30,6 +35,9 @@ Their profile:
 
 Recent conversation:
 {transcript}
+
+If a photo is attached it shows them right now (face and name tag); if audio is
+attached it is the last thing they said. Use tone and context the text misses.
 
 Reply with ONLY a JSON object with exactly these keys:
   topic               - what they are talking about right now, under 8 words
@@ -41,6 +49,7 @@ _buffers = defaultdict(list)
 _cache = {}
 _fired = {}
 _inflight = set()
+_media = {}  # pid -> (jpeg, wav) from the latest utterance
 _lock = threading.Lock()
 _pool = ThreadPoolExecutor(max_workers=2)
 
@@ -65,6 +74,42 @@ def _ask(prompt):
     return r.choices[0].message.content
 
 
+def omni_content(prompt, image=None, audio=None):
+    """One user message carrying all three modalities: vision, speech, language."""
+    parts = []
+    if image:
+        parts.append({"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}})
+    if audio:
+        parts.append({"type": "input_audio", "input_audio": {
+            "data": "data:;base64," + base64.b64encode(audio).decode(), "format": "wav"}})
+    parts.append({"type": "text", "text": prompt})
+    return parts
+
+
+def _ask_omni(prompt, image, audio):
+    key = os.environ.get("OMNI_API_KEY")
+    if not key:
+        return None
+    from openai import OpenAI
+    stream = OpenAI(api_key=key, base_url=OMNI_BASE_URL).chat.completions.create(
+        model=OMNI_MODEL, modalities=["text"],
+        messages=[{"role": "user", "content": omni_content(prompt, image, audio)}],
+        stream=True,  # Qwen Omni only serves streamed responses
+    )
+    return "".join(c.choices[0].delta.content or "" for c in stream if c.choices)
+
+
+def transcribe(wav):
+    """Speech-to-text via OpenAI. Blocking (~0.5-1s): call from a worker thread."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key or not wav:
+        return ""
+    from openai import OpenAI
+    return OpenAI(api_key=key).audio.transcriptions.create(
+        model=STT_MODEL, file=("utterance.wav", wav)).text.strip()
+
+
 def parse(raw):
     """Defensive by design: anything unparseable yields None, and None never
     overwrites a cached answer. A bad response must not blank a panel."""
@@ -87,7 +132,12 @@ def parse(raw):
 
 def _work(pid, prompt):
     try:
-        got = parse(_ask(prompt))
+        image, audio = _media.get(pid, (None, None))
+        try:
+            got = parse(_ask_omni(prompt, image, audio))
+        except Exception:
+            got = None                                # OMNI down / out of credits
+        got = got or parse(_ask(prompt))
         if got:
             with _lock:
                 _cache[pid] = got
@@ -98,13 +148,16 @@ def _work(pid, prompt):
             _inflight.discard(pid)
 
 
-def add_utterance(pid, text, profile=None, now=None, ask=None):
-    """Buffer a line; fire a call when it is worth one. Returns True if fired."""
+def add_utterance(pid, text, profile=None, now=None, ask=None, image=None, audio=None):
+    """Buffer a line; fire a call when it is worth one. Returns True if fired.
+    image/audio (jpeg/wav bytes) are kept as the latest media for OMNI."""
     now = time.time() if now is None else now
     if not pid or not (text or "").strip():
         return False
     with _lock:
         _buffers[pid].append(text.strip())
+        if image or audio:
+            _media[pid] = (image, audio)
         n = len(_buffers[pid])
         # The time trigger only applies once we've fired before, otherwise the very
         # first utterance looks infinitely overdue and burns a call on one line.
@@ -156,5 +209,9 @@ if __name__ == "__main__":
     assert get("p1")["topic"] == "ONNX on edge", "bad response blanked the panel"
 
     assert add_utterance("p2", "   ") is False, "blank utterance must not fire"
+
+    types = [p["type"] for p in omni_content("hi", b"jpg", b"wav")]
+    assert types == ["image_url", "input_audio", "text"], f"OMNI needs all 3 modalities: {types}"
+    assert [p["type"] for p in omni_content("hi")] == ["text"], "no media -> text only"
     assert get("p2") is None
     print("ok (no API key needed for this check)")

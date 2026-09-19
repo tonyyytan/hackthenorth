@@ -4,9 +4,15 @@ The trick is that this is not open-ended OCR: we match against a known roster of
 ~40 people, so "ALANA G0YAL" with a zero in it still resolves. difflib absorbs
 the noise that would otherwise need a better OCR engine.
 
+Reader: a Baseten-hosted vision model when BASETEN_API_KEY + BASETEN_VISION_MODEL are
+set (reads stylised/angled tags OCR misses), else local RapidOCR. Either way the text
+is only a probe into the roster -- a model that invents a name matches nobody.
+
     python badge.py        # self-check on a rendered badge
 """
+import base64
 import difflib
+import os
 import re
 
 import cv2
@@ -45,6 +51,26 @@ def read_lines(crop, min_conf=0.5):
     return [(t.strip(), c) for _, t, c in (result or []) if c >= min_conf and t.strip()]
 
 
+def read_with_baseten(crop):
+    """Name on the tag via Baseten Model APIs, as read_lines-style [(text, conf)].
+    None means "not configured", so the caller falls back to OCR."""
+    key, model = os.environ.get("BASETEN_API_KEY"), os.environ.get("BASETEN_VISION_MODEL")
+    if not (key and model):
+        return None
+    from openai import OpenAI
+    jpeg = base64.b64encode(cv2.imencode(".jpg", crop)[1].tobytes()).decode()
+    r = OpenAI(api_key=key, base_url="https://inference.baseten.co/v1").chat.completions.create(
+        model=model, temperature=0, max_tokens=20,
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg}"}},
+            {"type": "text", "text": "What person's name is printed on the name tag or badge? "
+                                     "Reply with only the name, or NONE if there is no readable name."},
+        ]}],
+    )
+    text = (r.choices[0].message.content or "").strip()
+    return [] if not text or text.upper().startswith("NONE") else [(text, 1.0)]
+
+
 def match_roster(lines, roster, cutoff=0.7):
     """roster: {person_id: display_name}. Returns (person_id, score) or (None, 0.0)."""
     names = {n.lower(): pid for pid, n in roster.items()}
@@ -68,7 +94,11 @@ def identify_badge(img, bbox, roster):
     crop = chest_crop(img, bbox)
     if crop is None:
         return None, 0.0
-    return match_roster(read_lines(crop), roster)
+    try:
+        lines = read_with_baseten(crop)
+    except Exception:
+        lines = None                                  # Baseten down -> local OCR
+    return match_roster(read_lines(crop) if lines is None else lines, roster)
 
 
 def _render_badge(name, noise=False):
@@ -90,6 +120,10 @@ if __name__ == "__main__":
         pid, score = match_roster(lines, roster)
         print(f"{target:15s} blur={blur!s:5s} -> {pid} ({score})  ocr={[t for t, _ in lines]}")
         assert pid, f"failed to read {target}"
+
+    # A vision model's answer goes through the same roster gate.
+    assert match_roster([("Charlie O'Neill", 1.0)], roster)[0] == "charlie-oneill"
+    assert match_roster([("Elon Musk", 1.0)], roster)[0] is None, "hallucinated name must not match"
 
     # A stranger's badge must not be forced onto the nearest roster name.
     pid, _ = match_roster(read_lines(_render_badge("Zbigniew Wrzeszcz")), roster)

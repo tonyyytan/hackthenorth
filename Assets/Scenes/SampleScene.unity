@@ -986,7 +986,7 @@ MonoBehaviour:
   requestFaceTrackingPermissionOnStartup: 0
   requestEyeTrackingPermissionOnStartup: 0
   requestScenePermissionOnStartup: 1
-  requestRecordAudioPermissionOnStartup: 0
+  requestRecordAudioPermissionOnStartup: 1
   requestPassthroughCameraAccessPermissionOnStartup: 1
   _localDimming: 1
   _trackingOriginType: 1

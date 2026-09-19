@@ -27,6 +27,8 @@ namespace HackTheNorth.Identity
         [Tooltip("Metres along the ray when the depth raycast misses and the server sent no distance_m.")]
         [SerializeField] private float fallbackDistance = 1.5f;
 
+        public string ServerUrl => serverUrl;
+
         private Texture2D frame;
         private int frameId;
         private readonly HashSet<string> shown = new();
