@@ -124,6 +124,22 @@ namespace HackTheNorth.UI
             followTarget = target;
         }
 
+        /// <summary>Configure this box to anchor to a world-space point (e.g. a TrackedTarget) instead of the wearer's head.</summary>
+        public void ConfigureWorldAnchor(Transform target, Vector3? worldOffset = null, Transform faceCam = null)
+        {
+            anchorMode = CaptionAnchorMode.WorldOffset;
+            followTarget = target;
+            if (worldOffset.HasValue) localOffset = worldOffset.Value;
+            faceCamera = faceCam;
+        }
+
+        /// <summary>Runtime-safe wiring for SpeakerCaptionBoxFactory — assigns the TMP labels without needing UnityEditor's SerializedObject.</summary>
+        public void Initialize(TMP_Text speakerLabel, TMP_Text messageLabelRef)
+        {
+            speakerNameLabel = speakerLabel;
+            messageLabel = messageLabelRef;
+        }
+
         private IEnumerator AutoHideAfterDelay()
         {
             yield return new WaitForSeconds(autoHideDelay);

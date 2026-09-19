@@ -66,15 +66,25 @@ namespace HackTheNorth.EditorTools
             var raycastManager = trackingGo.AddComponent<EnvironmentRaycastManager>();
             var registry = trackingGo.AddComponent<TrackedTargetRegistry>();
             var unprojector = trackingGo.AddComponent<WorldPointUnprojector>();
+            var spawner = trackingGo.AddComponent<TrackedCaptionSpawner>();
+
+            var mainCamera = Camera.main;
 
             var unprojectorSo = new SerializedObject(unprojector);
             unprojectorSo.FindProperty("raycastManager").objectReferenceValue = raycastManager;
-            var mainCamera = Camera.main;
             if (mainCamera != null)
             {
                 unprojectorSo.FindProperty("sourceCamera").objectReferenceValue = mainCamera;
             }
             unprojectorSo.ApplyModifiedPropertiesWithoutUndo();
+
+            var spawnerSo = new SerializedObject(spawner);
+            spawnerSo.FindProperty("registry").objectReferenceValue = registry;
+            if (mainCamera != null)
+            {
+                spawnerSo.FindProperty("faceCamera").objectReferenceValue = mainCamera;
+            }
+            spawnerSo.ApplyModifiedPropertiesWithoutUndo();
 
             Selection.activeGameObject = pipelineGo;
             EditorUtility.SetDirty(pipelineGo);
@@ -86,6 +96,40 @@ namespace HackTheNorth.EditorTools
                 "In Play Mode, right-click StubSpeechToText in the Inspector and call SimulateTranscript " +
                 "to test the full pipeline without a mic/real STT. Enable SegmentationTracking only on-device " +
                 "or over Quest Link with Spatial Data enabled.");
+        }
+
+        /// <summary>
+        /// Idempotent repair: wires an already-present TrackedCaptionSpawner's object-reference
+        /// fields via SerializedObject. Use this if the spawner was added to the scene directly
+        /// (e.g. via the MCP bridge's AddComponentById) rather than through CreateDemoHarness —
+        /// the bridge's reflection tools can set primitive fields but reliably fail to wire
+        /// Unity Object references, so this menu item exists as the fallback.
+        /// </summary>
+        [MenuItem("Tools/HackTheNorth/Wire Tracked Caption Spawner")]
+        public static void WireTrackedCaptionSpawner()
+        {
+            var spawner = Object.FindAnyObjectByType<TrackedCaptionSpawner>(FindObjectsInactive.Include);
+            var registry = Object.FindAnyObjectByType<TrackedTargetRegistry>(FindObjectsInactive.Include);
+            if (spawner == null || registry == null)
+            {
+                Debug.LogError("WireTrackedCaptionSpawner: need both a TrackedCaptionSpawner and a TrackedTargetRegistry in the scene.");
+                return;
+            }
+
+            var so = new SerializedObject(spawner);
+            so.FindProperty("registry").objectReferenceValue = registry;
+            var mainCamera = Camera.main;
+            if (mainCamera != null)
+            {
+                so.FindProperty("faceCamera").objectReferenceValue = mainCamera;
+            }
+            so.ApplyModifiedPropertiesWithoutUndo();
+
+            EditorUtility.SetDirty(spawner);
+            EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+            EditorSceneManager.SaveOpenScenes();
+
+            Debug.Log("WireTrackedCaptionSpawner: wired registry + faceCamera.");
         }
     }
 }
