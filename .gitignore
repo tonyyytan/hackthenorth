@@ -137,3 +137,10 @@ faces/*
 # Roster + research is built locally: python seed_profiles.py, then node server/research.js
 people.db
 judges.txt
+
+# Meta's sample project, reference only (CLAUDE.md) — never part of the build
+Unity-PassthroughCameraApiSamples/
+
+# Playwright's logged-in LinkedIn session is an account credential; counters are local state
+linkedin/user_data/
+linkedin/state.json
