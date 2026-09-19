@@ -116,3 +116,10 @@ InitTestScene*.unity*
 # Local meta-xr-operator MCP tooling's own injected OpenXR API layer — dev-machine-only,
 # not part of the app.
 /[Aa]ssets/XR/APILayers~/
+
+# Python
+__pycache__/
+dml_test/
+
+# Local agent notes
+CLAUDE.md
