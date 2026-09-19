@@ -144,3 +144,4 @@ Unity-PassthroughCameraApiSamples/
 # Playwright's logged-in LinkedIn session is an account credential; counters are local state
 linkedin/user_data/
 linkedin/state.json
+linkedin/session.json

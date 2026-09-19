@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -22,7 +23,8 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).parent
-USER_DATA = HERE / "user_data"      # the logged-in browser profile; gitignored
+USER_DATA = HERE / "user_data"      # the browser profile; gitignored
+SESSION = HERE / "session.json"     # the login cookies themselves; gitignored
 STATE = HERE / "state.json"         # rate-limit counters
 DB = HERE.parent / "people.db"
 
@@ -129,19 +131,36 @@ def _context(headful=False):
             viewport={"width": 1280, "height": 900},
             user_agent=UA,
         )
+        if SESSION.exists() and not _signed_in(_ctx):
+            # the profile dir lost the cookie (or was wiped); session.json is the backup
+            _ctx.add_cookies(json.loads(SESSION.read_text())["cookies"])
     return _ctx
 
 
+def _signed_in(ctx):
+    return any(c["name"] == "li_at" for c in ctx.cookies())
+
+
 def close():
-    """Always safe to call: a half-dead browser must still release user_data/."""
+    """Kill the browser. Never call ctx.close()/pw.stop() first -- see below."""
     global _pw, _ctx
-    for shut in (getattr(_ctx, "close", None), getattr(_pw, "stop", None)):
-        try:
-            if shut:
-                shut()
-        except Exception:
-            pass
+    # ponytail: Chromium's graceful shutdown takes 30-90s on this laptop and still leaves
+    # user_data/ locked afterwards, which is what wedges the next run. Killing the process
+    # that holds our profile dir is instant and releases the lock; the login survives it
+    # because login() writes session.json before we get here. Windows-only, like the demo.
     _pw = _ctx = None
+    # Match only the browser we launched (headful is chrome.exe, headless is
+    # chrome-headless-shell.exe), then taskkill /T for the tree: the renderer and
+    # crashpad children have no --user-data-dir of their own but do hold its files open.
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR "
+          "Name='chrome-headless-shell.exe'\" | "
+          f"Where-Object {{ $_.CommandLine -like '*{USER_DATA.parent.name}*{USER_DATA.name}*' }} | "
+          "ForEach-Object { taskkill /F /T /PID $_.ProcessId }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
 
 
 def _throttle():
@@ -195,7 +214,9 @@ def login():
         input("Sign in (incl. 2FA) in the browser window, then press Enter here... ")
         page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
-        ok = "/feed" in page.url
+        ok = "/feed" in page.url and _signed_in(ctx)
+        if ok:
+            ctx.storage_state(path=str(SESSION))   # the cookie, saved before we kill the browser
         print("logged in, session saved" if ok else f"not logged in (landed on {page.url})")
         return ok
     except KeyboardInterrupt:
@@ -207,7 +228,7 @@ def login():
 
 def status():
     """Is the session still good, and how many views are left today?"""
-    signed_in = any(c["name"] == "li_at" for c in _context().cookies())  # no page view
+    signed_in = _signed_in(_context())                   # cookie check, costs no page view
     close()
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     used = state.get("count", 0) if state.get("day") == time.strftime("%Y-%m-%d") else 0
