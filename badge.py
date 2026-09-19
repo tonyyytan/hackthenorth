@@ -76,8 +76,10 @@ def match_roster(lines, roster, cutoff=0.7):
     names = {n.lower(): pid for pid, n in roster.items()}
     texts = [t for t, _ in lines]
     # Badges routinely put the first and last name on separate lines, so try
-    # adjacent pairs too, not just each line alone.
-    probes = texts + [f"{a} {b}" for a, b in zip(texts, texts[1:])]
+    # adjacent pairs too, in both orders: OCR sorts boxes top-down, and a tall
+    # capital in the last name ("Aleyner") can sit higher than the first name.
+    pairs = list(zip(texts, texts[1:]))
+    probes = texts + [f"{a} {b}" for a, b in pairs] + [f"{b} {a}" for a, b in pairs]
     best = (None, 0.0)
     for text in probes:
         probe = re.sub(r"[^a-z ]+", "", text.lower()).strip()
@@ -114,7 +116,7 @@ def _render_badge(name, noise=False):
 
 if __name__ == "__main__":
     roster = {"alana-goyal": "Alana Goyal", "brooke-joseph": "Brooke Joseph",
-              "charlie-oneill": "Charlie O'Neill", "ryan-qi": "Ryan Qi"}
+              "charlie-oneill": "Charlie O'Neill", "ryan-qi": "Ryan Qi", "eli-aleyner": "Eli Aleyner"}
     for target, blur in [("Alana Goyal", False), ("Brooke Joseph", True), ("Ryan Qi", False)]:
         lines = read_lines(_render_badge(target, blur))
         pid, score = match_roster(lines, roster)
@@ -124,6 +126,8 @@ if __name__ == "__main__":
     # A vision model's answer goes through the same roster gate.
     assert match_roster([("Charlie O'Neill", 1.0)], roster)[0] == "charlie-oneill"
     assert match_roster([("Elon Musk", 1.0)], roster)[0] is None, "hallucinated name must not match"
+    # real handwritten tag: OCR returned the last name first, and misread both words
+    assert match_roster([("Aleynor", 0.9), ("El:", 0.85)], roster)[0] == "eli-aleyner"
 
     # A stranger's badge must not be forced onto the nearest roster name.
     pid, _ = match_roster(read_lines(_render_badge("Zbigniew Wrzeszcz")), roster)

@@ -127,3 +127,9 @@ dml_test/
 
 # Local agent notes
 CLAUDE.md
+
+# Real people's faces never get committed; only the test images below do
+faces/*
+!faces/testuser/
+!faces/thor.jpg
+!faces/loki.jpg
