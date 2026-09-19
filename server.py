@@ -14,7 +14,6 @@ import base64
 import json
 import math
 import os
-import urllib.request
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -277,21 +276,6 @@ async def reload():
     TRACKS.clear()
     PHOTOS.clear()
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
-
-
-@api.get("/stt-token")
-def stt_token():
-    """Single-use AssemblyAI streaming token for the Quest, so the real key never ships in
-    the APK. ASSEMBLYAI_API_KEY comes from the env or server/.env (brain.py loads it)."""
-    key = os.environ.get("ASSEMBLYAI_API_KEY")
-    if not key:
-        return {"token": "", "error": "ASSEMBLYAI_API_KEY not set on the server"}
-    req = urllib.request.Request("https://streaming.assemblyai.com/v3/token?expires_in_seconds=600",
-                                 headers={"Authorization": key})
-    try:
-        return {"token": json.load(urllib.request.urlopen(req, timeout=10))["token"]}
-    except Exception as e:
-        return {"token": "", "error": f"assemblyai: {e}"}
 
 
 @api.get("/health")

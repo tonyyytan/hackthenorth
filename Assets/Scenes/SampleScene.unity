@@ -697,114 +697,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 1342366371}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1020302974
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1020302979}
-  - component: {fileID: 1020302978}
-  - component: {fileID: 1020302977}
-  - component: {fileID: 1020302976}
-  - component: {fileID: 1020302975}
-  - component: {fileID: 1020302980}
-  m_Layer: 0
-  m_Name: CaptionPipelineDemo
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &1020302975
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9acacd916750b8441b648b8066b44c94, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Pipeline.CaptionPipeline
-  micCapture: {fileID: 1020302978}
-  speechToTextSource: {fileID: 1020302980}
-  llmClientSource: {fileID: 1020302976}
-  captionBox: {fileID: 1407983121}
---- !u!114 &1020302976
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 938005ea2b346f246b8d26f4e669c77c, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.LLM.StubLlmClient
---- !u!114 &1020302977
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 8979327d3eba97a4a93f00474ede8830, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Speech.StubSpeechToText
---- !u!114 &1020302978
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ef48c6a59e9a8544db3c104fc30015e4, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Audio.MicCapture
-  sampleRate: 16000
-  clipLengthSeconds: 10
-  speechRmsThreshold: 0.02
---- !u!4 &1020302979
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &1020302980
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1020302974}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: f50f99a5fa37e3f468d96a613fcdc009, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Speech.AssemblyAiStreamingSpeechToText
-  apiKeyFallback: 
-  sampleRate: 16000
-  formatTurns: 1
-  mode: min_latency
-  speechModel: 
 --- !u!1 &1058617387
 GameObject:
   m_ObjectHideFlags: 0
@@ -1004,7 +896,7 @@ MonoBehaviour:
   requestFaceTrackingPermissionOnStartup: 0
   requestEyeTrackingPermissionOnStartup: 0
   requestScenePermissionOnStartup: 1
-  requestRecordAudioPermissionOnStartup: 1
+  requestRecordAudioPermissionOnStartup: 0
   requestPassthroughCameraAccessPermissionOnStartup: 1
   _localDimming: 1
   _trackingOriginType: 1
@@ -2074,5 +1966,4 @@ SceneRoots:
   - {fileID: 1407983125}
   - {fileID: 1169699825}
   - {fileID: 1352908588}
-  - {fileID: 1020302979}
   - {fileID: 1888136647}
