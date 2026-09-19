@@ -112,3 +112,7 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# Local meta-xr-operator MCP tooling's own injected OpenXR API layer — dev-machine-only,
+# not part of the app.
+/[Aa]ssets/XR/APILayers~/

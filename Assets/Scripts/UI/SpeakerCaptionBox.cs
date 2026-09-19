@@ -9,16 +9,27 @@ namespace HackTheNorth.UI
     /// (the wearer's head by default) and always faces them. Call ShowDialogue() to
     /// display a speaker + message pair, e.g. from a speech-to-text/LLM pipeline.
     /// </summary>
+    public enum CaptionAnchorMode
+    {
+        /// <summary>Offset rotates with the target — right for a HUD box hovering near the wearer's head.</summary>
+        HeadRelative,
+        /// <summary>Offset stays fixed in world space — right for a box anchored to a tracked real-world object, which has no meaningful "forward."</summary>
+        WorldOffset
+    }
+
     [RequireComponent(typeof(CanvasGroup))]
     public class SpeakerCaptionBox : MonoBehaviour
     {
         [Header("Follow")]
         [Tooltip("Transform to hover near. Defaults to Camera.main at runtime if left empty.")]
         [SerializeField] private Transform followTarget;
-        [Tooltip("Offset from the target, in the target's local space (x=right, y=up, z=forward).")]
+        [SerializeField] private CaptionAnchorMode anchorMode = CaptionAnchorMode.HeadRelative;
+        [Tooltip("HeadRelative: offset in the target's local space (x=right, y=up, z=forward). WorldOffset: offset added directly in world space (e.g. straight up from an anchor).")]
         [SerializeField] private Vector3 localOffset = new Vector3(0.25f, -0.1f, 1.0f);
         [SerializeField] private float positionSmoothTime = 0.15f;
         [SerializeField] private float rotationSmoothSpeed = 8f;
+        [Tooltip("WorldOffset only: face this camera instead of the follow target. Defaults to Camera.main.")]
+        [SerializeField] private Transform faceCamera;
 
         [Header("Content")]
         [SerializeField] private TMP_Text speakerNameLabel;
@@ -53,10 +64,17 @@ namespace HackTheNorth.UI
                 followTarget = Camera.main.transform;
             }
 
-            Vector3 desiredPosition = followTarget.position + followTarget.rotation * localOffset;
+            Vector3 desiredPosition = anchorMode == CaptionAnchorMode.WorldOffset
+                ? followTarget.position + localOffset
+                : followTarget.position + followTarget.rotation * localOffset;
             transform.position = Vector3.SmoothDamp(transform.position, desiredPosition, ref velocity, positionSmoothTime);
 
-            Vector3 lookDirection = transform.position - followTarget.position;
+            Transform faceTarget = anchorMode == CaptionAnchorMode.WorldOffset
+                ? (faceCamera != null ? faceCamera : Camera.main != null ? Camera.main.transform : followTarget)
+                : followTarget;
+            if (faceTarget == null) return;
+
+            Vector3 lookDirection = transform.position - faceTarget.position;
             if (lookDirection.sqrMagnitude > 0.0001f)
             {
                 Quaternion desiredRotation = Quaternion.LookRotation(lookDirection);
