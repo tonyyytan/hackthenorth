@@ -710,6 +710,7 @@ GameObject:
   - component: {fileID: 1020302977}
   - component: {fileID: 1020302976}
   - component: {fileID: 1020302975}
+  - component: {fileID: 1020302980}
   m_Layer: 0
   m_Name: CaptionPipelineDemo
   m_TagString: Untagged
@@ -730,8 +731,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Pipeline.CaptionPipeline
   micCapture: {fileID: 1020302978}
-  speechToText: {fileID: 1020302977}
-  llmClient: {fileID: 1020302976}
+  speechToTextSource: {fileID: 1020302980}
+  llmClientSource: {fileID: 1020302976}
   captionBox: {fileID: 1407983121}
 --- !u!114 &1020302976
 MonoBehaviour:
@@ -787,6 +788,23 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1020302980
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1020302974}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f50f99a5fa37e3f468d96a613fcdc009, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Speech.AssemblyAiStreamingSpeechToText
+  apiKeyFallback: 
+  sampleRate: 16000
+  formatTurns: 1
+  mode: min_latency
+  speechModel: 
 --- !u!1 &1058617387
 GameObject:
   m_ObjectHideFlags: 0
