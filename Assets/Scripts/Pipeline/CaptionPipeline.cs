@@ -38,6 +38,16 @@ namespace HackTheNorth.Pipeline
         private void OnEnable() => Rebind();
         private void OnDisable() => Unbind();
 
+        // Proof of life on device. This scene draws nothing of its own — the background is
+        // passthrough and the caption box starts invisible — so a black headset can't be told
+        // apart from a dead app. If you see this banner, the build is running and only the
+        // voice path is broken.
+        // ponytail: a 4s banner, not a debug HUD. Delete it once the demo is stable.
+        private void Start()
+        {
+            if (captionBox != null) captionBox.ShowDialogue("Ready", "listening…");
+        }
+
         /// <summary>
         /// (Re)subscribes to the current micCapture/speechToTextSource references. Call this
         /// explicitly after assigning those fields via editor tooling (e.g. SerializedObject
