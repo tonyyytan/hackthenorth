@@ -133,11 +133,14 @@ def _context(headful=False):
 
 
 def close():
+    """Always safe to call: a half-dead browser must still release user_data/."""
     global _pw, _ctx
-    if _ctx:
-        _ctx.close()
-    if _pw:
-        _pw.stop()
+    for shut in (getattr(_ctx, "close", None), getattr(_pw, "stop", None)):
+        try:
+            if shut:
+                shut()
+        except Exception:
+            pass
     _pw = _ctx = None
 
 
@@ -185,16 +188,21 @@ def lookup(name, context="", headful=False):
 
 def login():
     """Headful browser, you sign in by hand once; the cookie stays in user_data/."""
-    ctx = _context(headful=True)
-    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-    input("Sign in (incl. 2FA) in the browser window, then press Enter here... ")
-    page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-    page.wait_for_timeout(2000)
-    ok = "/feed" in page.url
-    print("logged in, session saved" if ok else f"not logged in (landed on {page.url})")
-    close()
-    return ok
+    try:
+        ctx = _context(headful=True)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+        input("Sign in (incl. 2FA) in the browser window, then press Enter here... ")
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        ok = "/feed" in page.url
+        print("logged in, session saved" if ok else f"not logged in (landed on {page.url})")
+        return ok
+    except KeyboardInterrupt:
+        print("\ncancelled")
+        return False
+    finally:
+        close()  # Ctrl-C here used to orphan the browser, which then held user_data/ locked
 
 
 def status():
