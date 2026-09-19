@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using UnityEngine;
+using UnityEngine.Android;
 
 namespace HackTheNorth.Audio
 {
@@ -25,17 +27,28 @@ namespace HackTheNorth.Audio
         private int readPosition;
         private float[] frameBuffer;
 
-        private void Start()
+        private IEnumerator Start()
         {
+            // Quest: RECORD_AUDIO is a runtime permission. Without it Microphone.devices is
+            // empty and the whole voice pipeline dies silently.
+            // ponytail: poll the permission instead of the callback API; it's a one-time
+            // startup dialog, and the callback version is three more types for no gain.
+            if (!Permission.HasUserAuthorizedPermission(Permission.Microphone))
+            {
+                Permission.RequestUserPermission(Permission.Microphone);
+                while (!Permission.HasUserAuthorizedPermission(Permission.Microphone)) yield return null;
+            }
+
             if (Microphone.devices.Length == 0)
             {
                 Debug.LogWarning("MicCapture: no microphone devices found.");
                 enabled = false;
-                return;
+                yield break;
             }
 
             micDevice = Microphone.devices[0];
             micClip = Microphone.Start(micDevice, true, clipLengthSeconds, sampleRate);
+            Debug.Log($"MicCapture: recording from '{micDevice}' at {sampleRate}Hz.");
         }
 
         private void Update()
