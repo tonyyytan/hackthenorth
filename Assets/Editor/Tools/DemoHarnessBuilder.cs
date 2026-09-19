@@ -106,40 +106,6 @@ namespace HackTheNorth.EditorTools
         }
 
         /// <summary>
-        /// Adds PassthroughCameraAccess + FaceIdClient (server.py bridge) to the SegmentationTracking
-        /// GameObject, so they share its inactive-in-editor state. Run Create Demo Harness first.
-        /// </summary>
-        [MenuItem("Tools/HackTheNorth/Add Face ID Client")]
-        public static void AddFaceIdClient()
-        {
-            var registry = Object.FindAnyObjectByType<TrackedTargetRegistry>(FindObjectsInactive.Include);
-            var spawner = Object.FindAnyObjectByType<TrackedCaptionSpawner>(FindObjectsInactive.Include);
-            var raycast = Object.FindAnyObjectByType<EnvironmentRaycastManager>(FindObjectsInactive.Include);
-            if (registry == null || spawner == null)
-            {
-                Debug.LogError("AddFaceIdClient: run Tools/HackTheNorth/Create Demo Harness first.");
-                return;
-            }
-
-            var go = registry.gameObject;
-            // TryGetComponent, not ??: in the editor a missing GetComponent returns a fake-null object.
-            if (!go.TryGetComponent(out PassthroughCameraAccess cam)) cam = go.AddComponent<PassthroughCameraAccess>();
-            if (!go.TryGetComponent(out HackTheNorth.Identity.FaceIdClient client)) client = go.AddComponent<HackTheNorth.Identity.FaceIdClient>();
-
-            var so = new SerializedObject(client);
-            so.FindProperty("cameraAccess").objectReferenceValue = cam;
-            so.FindProperty("raycastManager").objectReferenceValue = raycast;
-            so.FindProperty("registry").objectReferenceValue = registry;
-            so.FindProperty("spawner").objectReferenceValue = spawner;
-            so.ApplyModifiedPropertiesWithoutUndo();
-
-            EditorUtility.SetDirty(go);
-            EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-            EditorSceneManager.SaveOpenScenes();
-            Debug.Log($"AddFaceIdClient: added to {go.name}. Set FaceIdClient.serverUrl to the LAN IP server.py prints.");
-        }
-
-        /// <summary>
         /// Idempotent repair: wires an already-present TrackedCaptionSpawner's object-reference
         /// fields via SerializedObject. Use this if the spawner was added to the scene directly
         /// (e.g. via the MCP bridge's AddComponentById) rather than through CreateDemoHarness —
