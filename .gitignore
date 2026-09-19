@@ -1,3 +1,7 @@
+# Node (server/)
+server/node_modules/
+server/.env
+
 # Unity .gitignore Template
 # Source: https://github.com/github/gitignore/blob/main/Unity.gitignore
 # Last synced: 2026-07-02
