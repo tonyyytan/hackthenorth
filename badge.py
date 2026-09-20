@@ -4,9 +4,10 @@ The trick is that this is not open-ended OCR: we match against a known roster of
 ~40 people, so "ALANA G0YAL" with a zero in it still resolves. difflib absorbs
 the noise that would otherwise need a better OCR engine.
 
-Reader: a Baseten-hosted vision model when BASETEN_API_KEY + BASETEN_VISION_MODEL are
-set (reads stylised/angled tags OCR misses), else local RapidOCR. Either way the text
-is only a probe into the roster -- a model that invents a name matches nobody.
+Reader: a Baseten-hosted vision model when BASETEN_API_KEY is set -- it reads stylised
+and angled tags OCR misses -- else local RapidOCR. BASETEN_VISION_MODEL overrides the
+default model. Either way the text is only a probe into the roster: a model that
+invents a name matches nobody.
 
     python badge.py        # self-check on a rendered badge
 """
@@ -54,13 +55,19 @@ def read_lines(crop, min_conf=0.5):
 def read_with_baseten(crop):
     """Name on the tag via Baseten Model APIs, as read_lines-style [(text, conf)].
     None means "not configured", so the caller falls back to OCR."""
-    key, model = os.environ.get("BASETEN_API_KEY"), os.environ.get("BASETEN_VISION_MODEL")
-    if not (key and model):
+    key = os.environ.get("BASETEN_API_KEY")
+    if not key:
         return None
+    # ponytail: cheapest image model on Baseten ($0.15/1M in). Measured ~600 tokens in,
+    # ~6 out, 0.8-1.4s per read = ~$0.0001; reads once per unnamed track, not per frame.
+    model = os.environ.get("BASETEN_VISION_MODEL", "zai-org/GLM-5.3-Flash")
     from openai import OpenAI
     jpeg = base64.b64encode(cv2.imencode(".jpg", crop)[1].tobytes()).decode()
     r = OpenAI(api_key=key, base_url="https://inference.baseten.co/v1").chat.completions.create(
-        model=model, temperature=0, max_tokens=20,
+        model=model, temperature=0, max_tokens=64,
+        # Thinking burns the token cap before the answer (returned "Brooke" for "Brooke
+        # Joseph" at 20) and triples latency; a name read needs none.
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         messages=[{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg}"}},
             {"type": "text", "text": "What person's name is printed on the name tag or badge? "
