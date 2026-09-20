@@ -36,6 +36,11 @@ PROFILE_CHARS = 2000 # text handed to the LLM per person; it rides in every brai
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 PROFILE_RE = re.compile(r"(?:[a-z]{2,3}\.)?linkedin\.com/in/([A-Za-z0-9\-_%]{3,100})")
+# Everything below one of these headings is OTHER people -- their names and job titles,
+# which an LLM will happily attribute to the person on screen. Hard stop before them.
+OTHERS_RE = re.compile(r"^(More profiles for you|People you may know|Others viewed|"
+                       r"Explore Premium profiles|You might like|More pages for you|"
+                       r"Similar pages)$", re.I | re.M)
 JUNK_RE = re.compile(r"^(|Message|Follow|Connect|More|Save|Show all.*|See more|"
                      r"Join to view.*|See your mutual.*|Sign in|Join now|.*followers|"
                      r".*connections?|Contact Info|View .*'s full profile)$", re.I)
@@ -185,14 +190,18 @@ def fetch_profile(url, headful=False):
     page = _context(headful).new_page()
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2500)                 # lazily rendered sections
+        page.wait_for_timeout(1500)
+        for _ in range(3):                          # Experience/Education only render
+            page.mouse.wheel(0, 1600)               # once they're scrolled into view
+            page.wait_for_timeout(600)
         if re.search(r"/(authwall|login|checkpoint|uas)", page.url):
             raise RuntimeError("login wall -- run: python linkedin/lookup.py login")
         body = page.inner_text("main" if page.locator("main").count() else "body")
     finally:
         page.close()
     lines = [ln.strip() for ln in body.splitlines() if not JUNK_RE.match(ln.strip())]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:PROFILE_CHARS]
+    text = OTHERS_RE.split("\n".join(lines))[0]     # drop the recommended-people rail
+    return re.sub(r"\n{3,}", "\n\n", text).strip()[:PROFILE_CHARS]
 
 
 def lookup(name, context="", headful=False):
