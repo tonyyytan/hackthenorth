@@ -61,8 +61,10 @@ def image_urls(page_url, name):
         return []
     doc, last, full = str(page.get("content", "")), letters(name.split()[-1]), letters(name)
     # a page whose URL names them (conffab.com/presenter/tom-alterman) is about them,
-    # so its og:image counts as captioned
-    about_them = last in letters(urllib.parse.urlparse(page_url).path)
+    # so its og:image counts as captioned. The domain counts too: jendewalt.com is her
+    # own site, and a personal site's headshot is the best photo we ever get.
+    url_parts = urllib.parse.urlparse(page_url)
+    about_them = last in letters(url_parts.path) or last in letters(url_parts.netloc)
     found = []
     for m in re.finditer(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*>', doc, re.I):
         src = re.search(r'content=["\']([^"\']+)', m.group(0))

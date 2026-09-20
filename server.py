@@ -257,7 +257,11 @@ async def utterance(msg: dict):
     background -- only the transcription is waited on.
     "force": true skips the normal 4-utterances/15s batching gate -- for manual
     testing/demoing (see talk.py) where one typed line should get an answer now."""
-    pid = msg.get("person_id") or FOCUS
+    # "unknown" when no face has been identified yet: the Pi hears people the camera
+    # has not seen, and brain.add_utterance drops anything with no pid. Insight then
+    # comes from the transcript alone -- image and profile are both optional -- and
+    # brain.latest() surfaces it on the no-camera overlay.
+    pid = msg.get("person_id") or FOCUS or "unknown"
     audio = base64.b64decode(msg["audio_b64"]) if msg.get("audio_b64") else None
     text = msg.get("text") or ""
     if audio and not text:
