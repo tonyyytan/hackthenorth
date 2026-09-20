@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -22,7 +23,8 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).parent
-USER_DATA = HERE / "user_data"      # the logged-in browser profile; gitignored
+USER_DATA = HERE / "user_data"      # the browser profile; gitignored
+SESSION = HERE / "session.json"     # the login cookies themselves; gitignored
 STATE = HERE / "state.json"         # rate-limit counters
 DB = HERE.parent / "people.db"
 
@@ -34,6 +36,11 @@ PROFILE_CHARS = 2000 # text handed to the LLM per person; it rides in every brai
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 PROFILE_RE = re.compile(r"(?:[a-z]{2,3}\.)?linkedin\.com/in/([A-Za-z0-9\-_%]{3,100})")
+# Everything below one of these headings is OTHER people -- their names and job titles,
+# which an LLM will happily attribute to the person on screen. Hard stop before them.
+OTHERS_RE = re.compile(r"^(More profiles for you|People you may know|Others viewed|"
+                       r"Explore Premium profiles|You might like|More pages for you|"
+                       r"Similar pages)$", re.I | re.M)
 JUNK_RE = re.compile(r"^(|Message|Follow|Connect|More|Save|Show all.*|See more|"
                      r"Join to view.*|See your mutual.*|Sign in|Join now|.*followers|"
                      r".*connections?|Contact Info|View .*'s full profile)$", re.I)
@@ -129,16 +136,36 @@ def _context(headful=False):
             viewport={"width": 1280, "height": 900},
             user_agent=UA,
         )
+        if SESSION.exists() and not _signed_in(_ctx):
+            # the profile dir lost the cookie (or was wiped); session.json is the backup
+            _ctx.add_cookies(json.loads(SESSION.read_text())["cookies"])
     return _ctx
 
 
+def _signed_in(ctx):
+    return any(c["name"] == "li_at" for c in ctx.cookies())
+
+
 def close():
+    """Kill the browser. Never call ctx.close()/pw.stop() first -- see below."""
     global _pw, _ctx
-    if _ctx:
-        _ctx.close()
-    if _pw:
-        _pw.stop()
+    # ponytail: Chromium's graceful shutdown takes 30-90s on this laptop and still leaves
+    # user_data/ locked afterwards, which is what wedges the next run. Killing the process
+    # that holds our profile dir is instant and releases the lock; the login survives it
+    # because login() writes session.json before we get here. Windows-only, like the demo.
     _pw = _ctx = None
+    # Match only the browser we launched (headful is chrome.exe, headless is
+    # chrome-headless-shell.exe), then taskkill /T for the tree: the renderer and
+    # crashpad children have no --user-data-dir of their own but do hold its files open.
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR "
+          "Name='chrome-headless-shell.exe'\" | "
+          f"Where-Object {{ $_.CommandLine -like '*{USER_DATA.parent.name}*{USER_DATA.name}*' }} | "
+          "ForEach-Object { taskkill /F /T /PID $_.ProcessId }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
 
 
 def _throttle():
@@ -163,14 +190,18 @@ def fetch_profile(url, headful=False):
     page = _context(headful).new_page()
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2500)                 # lazily rendered sections
+        page.wait_for_timeout(1500)
+        for _ in range(3):                          # Experience/Education only render
+            page.mouse.wheel(0, 1600)               # once they're scrolled into view
+            page.wait_for_timeout(600)
         if re.search(r"/(authwall|login|checkpoint|uas)", page.url):
             raise RuntimeError("login wall -- run: python linkedin/lookup.py login")
         body = page.inner_text("main" if page.locator("main").count() else "body")
     finally:
         page.close()
     lines = [ln.strip() for ln in body.splitlines() if not JUNK_RE.match(ln.strip())]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:PROFILE_CHARS]
+    text = OTHERS_RE.split("\n".join(lines))[0]     # drop the recommended-people rail
+    return re.sub(r"\n{3,}", "\n\n", text).strip()[:PROFILE_CHARS]
 
 
 def lookup(name, context="", headful=False):
@@ -185,21 +216,28 @@ def lookup(name, context="", headful=False):
 
 def login():
     """Headful browser, you sign in by hand once; the cookie stays in user_data/."""
-    ctx = _context(headful=True)
-    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-    input("Sign in (incl. 2FA) in the browser window, then press Enter here... ")
-    page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-    page.wait_for_timeout(2000)
-    ok = "/feed" in page.url
-    print("logged in, session saved" if ok else f"not logged in (landed on {page.url})")
-    close()
-    return ok
+    try:
+        ctx = _context(headful=True)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
+        input("Sign in (incl. 2FA) in the browser window, then press Enter here... ")
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        ok = "/feed" in page.url and _signed_in(ctx)
+        if ok:
+            ctx.storage_state(path=str(SESSION))   # the cookie, saved before we kill the browser
+        print("logged in, session saved" if ok else f"not logged in (landed on {page.url})")
+        return ok
+    except KeyboardInterrupt:
+        print("\ncancelled")
+        return False
+    finally:
+        close()  # Ctrl-C here used to orphan the browser, which then held user_data/ locked
 
 
 def status():
     """Is the session still good, and how many views are left today?"""
-    signed_in = any(c["name"] == "li_at" for c in _context().cookies())  # no page view
+    signed_in = _signed_in(_context())                   # cookie check, costs no page view
     close()
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     used = state.get("count", 0) if state.get("day") == time.strftime("%Y-%m-%d") else 0
