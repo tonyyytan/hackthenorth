@@ -4,11 +4,14 @@
 // Results land in people.db `research` + `opener`; server.py's SELECT * hands them to brain.py and Unity.
 //
 // Usage:
-//   node research.js                 research everyone not yet researched
-//   node research.js <person-id>     (re)research one person, e.g. tom-alterman
+//   node research.js                     research everyone not yet researched
+//   node research.js <person-id>         (re)research one person, e.g. tom-alterman
+//   node research.js "Jane Doe" "Figma, Designer"   someone not in people.db yet:
+//                                        adds the row, then researches them
 
-require("dotenv").config({ quiet: true });
 const path = require("path");
+// __dirname, not cwd: this has to work when run from the repo root too.
+require("dotenv").config({ path: path.join(__dirname, ".env"), quiet: true });
 const { DatabaseSync } = require("node:sqlite");
 const Anthropic = require("@anthropic-ai/sdk").default;
 const { chromium } = require("playwright-core");
@@ -132,6 +135,12 @@ async function research(profile, log = () => {}) {
   throw new Error("no answer within MAX_TURNS");
 }
 
+// Same rule as seed_profiles.person_id: one id scheme everywhere, never two.
+function personId(name) {
+  return name.toLowerCase().replace(/'/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+
 function openDb() {
   const db = new DatabaseSync(path.join(__dirname, "..", "people.db"));
   const cols = db.prepare("PRAGMA table_info(people)").all().map((c) => c.name);
@@ -149,13 +158,26 @@ async function main() {
     }
   }
   const db = openDb();
-  const id = process.argv[2];
-  const people = id
+  const arg = process.argv[2];
+  const id = arg && personId(arg);
+  let people = id
     ? db.prepare("SELECT * FROM people WHERE id = ?").all(id)
-    : db.prepare("SELECT * FROM people WHERE research IS NULL").all();
-  if (id && people.length === 0) {
-    console.error(`No person '${id}' in people.db.`);
-    process.exit(1);
+    : arg
+      ? []
+      : db.prepare("SELECT * FROM people WHERE research IS NULL").all();
+  // Not in the roster yet: add them rather than making the caller write SQL first.
+  // personId() is seed_profiles.person_id, so "Jane Doe" and "jane-doe" are one row.
+  if (arg && people.length === 0) {
+    const name = arg.includes(" ") ? arg : null;
+    if (!name) {
+      console.error(`No person '${id}' in people.db. Pass a full name to add them: `
+        + `node research.js "Jane Doe" "Figma, Designer"`);
+      process.exit(1);
+    }
+    db.prepare("INSERT INTO people (id, name, role) VALUES (?, ?, ?)")
+      .run(id, name, process.argv[3] || "");
+    console.log(`added ${id} to people.db`);
+    people = db.prepare("SELECT * FROM people WHERE id = ?").all(id);
   }
   console.log(`Researching ${people.length} people, ${PARALLEL} at a time...`);
 
