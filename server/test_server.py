@@ -3,7 +3,17 @@ import json
 import threading
 import time
 
-from .server import CONVERSATIONS, FACE_WIDTH_M, ConversationManager, distance_m, iou
+from .server import (
+    CONVERSATIONS,
+    FACE_WIDTH_M,
+    ConversationManager,
+    _remember_identity_result,
+    _remember_latest_frame,
+    _research_list,
+    distance_m,
+    iou,
+    resolve_latest_frame_research,
+)
 
 
 def wait_for(predicate, timeout=1.0):
@@ -145,6 +155,91 @@ def test_ended_session_discards_slow_generation():
         manager.close()
 
 
+def test_latest_identity_populates_and_clears_panels():
+    generated = []
+
+    def resolve():
+        return {
+            "person_id": "alex",
+            "profile": {"name": "Alex", "verbose_research": "Long context"},
+            "verbose": "Long context",
+            "concise": ["Builds developer tools", "Interested in spatial computing"],
+            "sources": [],
+        }
+
+    def generate(person_id, profile, research, transcript):
+        generated.append((person_id, research["verbose"], list(transcript)))
+        return {
+            "headline": "Ask about AR",
+            "talking_points": ["Compare headset constraints"],
+            "suggested_question": "What interaction felt most natural?",
+        }
+
+    manager = ConversationManager(
+        generate,
+        refresh_seconds=10,
+        end_phrases=["bye", "see you later"],
+        identity_resolver=resolve,
+    )
+    try:
+        manager.start()
+        wait_for(lambda: bool(manager.panel_two()["text"]))
+        assert manager.panel_one()["bullets"] == [
+            "Builds developer tools", "Interested in spatial computing"
+        ]
+        assert "Long context" not in manager.panel_one()["text"]
+        assert manager.panel_two()["talking_points"] == ["Compare headset constraints"]
+        assert generated == [("alex", "Long context", [])]
+
+        manager.ingest("See you later!")
+        assert manager.panel_one()["text"] == ""
+        assert manager.panel_two()["text"] == ""
+        assert not manager.state()["active"]
+    finally:
+        manager.close()
+
+
+def test_failed_identity_ends_conversation_and_blanks_panels():
+    manager = ConversationManager(
+        lambda *args: {},
+        identity_resolver=lambda: None,
+    )
+    try:
+        manager.start()
+        wait_for(lambda: not manager.state()["active"])
+        assert manager.panel_one()["text"] == ""
+        assert manager.panel_two()["text"] == ""
+        events = manager.events_after(0)["events"]
+        assert events[-2]["type"] == "conversation_error"
+        assert events[-1]["type"] == "conversation_ended"
+        assert events[-1]["reason"] == "identity_not_found"
+    finally:
+        manager.close()
+
+
+def test_research_list_accepts_sqlite_text_formats():
+    assert _research_list('["one", "two"]') == ["one", "two"]
+    assert _research_list("- one\n• two") == ["one", "two"]
+
+
+def test_latest_frame_resolver_uses_new_database_columns():
+    token = _remember_latest_frame(b"jpeg", 7, 80.0)
+    _remember_identity_result(token, {
+        "faces": [{
+            "name": "alex",
+            "profile": {
+                "name": "Alex",
+                "verbose_research": "Full model-facing context",
+                "concise_research": '["First bullet", "Second bullet"]',
+            },
+        }],
+    })
+    result = resolve_latest_frame_research()
+    assert result["person_id"] == "alex"
+    assert result["verbose"] == "Full model-facing context"
+    assert result["concise"] == ["First bullet", "Second bullet"]
+
+
 if __name__ == "__main__":
     try:
         test_distance()
@@ -152,6 +247,10 @@ if __name__ == "__main__":
         test_conversation_lifecycle()
         test_triggers_across_chunks_and_no_active_restart()
         test_ended_session_discards_slow_generation()
+        test_latest_identity_populates_and_clears_panels()
+        test_failed_identity_ends_conversation_and_blanks_panels()
+        test_research_list_accepts_sqlite_text_formats()
+        test_latest_frame_resolver_uses_new_database_columns()
         print(f"ok (FACE_WIDTH_M={FACE_WIDTH_M})")
     finally:
         CONVERSATIONS.close()

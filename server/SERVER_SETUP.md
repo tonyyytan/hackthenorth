@@ -1,20 +1,20 @@
 # Conversation server
 
-This directory contains the server only. The Raspberry Pi transcription pipeline and
-the face/database/research pipeline are separate components with small HTTP contracts.
-The conversation pipeline never captures audio, calls AssemblyAI, segments faces,
-matches identities, or researches people. The pre-existing standalone `/id` identity
-endpoint remains available but is not coupled to conversation mode.
+This directory contains the server only. The Raspberry Pi transcription pipeline is a
+separate component. The Quest continuously posts camera frames to `/id`; the server
+caches the newest frame and couples its identity result to conversation mode. Research
+is precomputed and stored on the person's `people.db` row as `verbose_research` and
+`concise_research`.
 
 ## Runtime flow
 
-1. The Pi posts finalized transcript chunks to `POST /transcript`.
-2. A configured start phrase creates a clean conversation session and publishes an
-   `identify_and_research_requested` event containing the new `session_id`.
-3. The separate face/research component consumes that event, performs its full flow,
-   then posts the matched profile plus verbose and concise research to
-   `POST /conversation/research` with the same `session_id`.
-4. The server publishes `research_ready` with only the concise version for panel one.
+1. The Pi posts finalized transcript chunks to `POST /utterance`.
+2. A configured start phrase creates a clean conversation session and asynchronously
+   identifies the largest enrolled person in the newest Quest frame.
+3. If nobody with a database profile and both research fields matches, the server ends
+   the conversation and both panel endpoints remain blank.
+4. A successful match loads cached research and publishes `research_ready` with only
+   the concise version for panel one.
 5. The server immediately generates panel-two talking points from verbose research
    plus the current transcript, then publishes `talking_points_ready`.
 6. It regenerates talking points at the configured interval while transcription keeps
@@ -22,9 +22,10 @@ endpoint remains available but is not coupled to conversation mode.
 7. An end phrase publishes `conversation_ended` and drops the session's transcript and
    research. Late results carrying the old session ID are rejected or ignored.
 
-Consumers poll `GET /conversation/events?after=<event_id>` for ordered events. This is
-deliberately transport-simple for the prototype; the event contract can later sit behind
-WebSockets without changing the state machine.
+The self-installing Quest `ConversationPanelClient` polls `GET /conversation/panel1` and
+`GET /conversation/panel2`; each returns a `text` field plus structured fields. `text` is
+empty before data is ready and immediately after the conversation ends.
+`GET /conversation/events?after=<event_id>` remains an ordered diagnostic feed.
 
 ## Install and run
 
@@ -48,7 +49,7 @@ the event queue are intentionally in memory.
 ### Transcript input
 
 ```http
-POST /transcript
+POST /utterance
 Content-Type: application/json
 
 {
@@ -66,64 +67,46 @@ network retries safe and prevents a retried trigger from starting a second sessi
 GET /conversation/events?after=0
 ```
 
-The face/research component reacts to `identify_and_research_requested`. The Meta Quest
-consumer reacts to `research_ready`, `talking_points_ready`, and `conversation_ended`.
-Every event includes a monotonically increasing `id` and its `session_id`.
+The feed records `identify_and_research_requested`, `research_ready`,
+`talking_points_ready`, errors, and conversation end. Every event includes a
+monotonically increasing `id` and its `session_id`; the built-in resolver handles
+identity/research without an external event consumer.
 
-### Face/research result input
+### Quest panel output
 
 ```http
-POST /conversation/research
-Content-Type: application/json
+GET /conversation/panel1
 
 {
-  "session_id": "SESSION_ID_FROM_THE_EVENT",
+  "text": "• Founder at Example\n• Interested in applied AI",
+  "session_id": "...",
   "person_id": "jane-doe",
-  "profile": {
-    "name": "Jane Doe",
-    "role": "Founder at Example",
-    "links": ["https://example.com/jane"]
-  },
-  "verbose_research": "Detailed model-facing research goes here...",
-  "concise_research": [
-    "Founder at Example",
-    "Recently launched a developer platform",
-    "Interested in applied AI"
-  ],
-  "sources": ["https://example.com/jane"]
+  "display_name": "Jane Doe",
+  "bullets": ["Founder at Example", "Interested in applied AI"]
 }
 ```
 
-The verbose research is retained server-side for generation. Only concise research is
-included in the `research_ready` event intended for the headset.
+`GET /conversation/panel2` similarly returns `text`, `headline`, `talking_points`,
+`suggested_question`, and `version`. Both endpoints return `text: ""` while unavailable
+or inactive. The verbose research is retained only in server-side session state.
+
+`concise_research` may be a JSON array encoded in SQLite TEXT or newline-delimited TEXT.
+`verbose_research` must be non-empty. `POST /conversation/research` remains available as
+an optional compatibility/testing injection point, but normal operation loads both
+columns from the profile matched against the latest `/id` frame.
 
 ## Manual smoke test
 
-Set `TALKING_POINTS_PROVIDER=dummy`, start the server, then:
+Set `TALKING_POINTS_PROVIDER=dummy`, start the server, and allow the Quest to post at
+least one `/id` frame. Then trigger a conversation through the Pi or manually:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/conversation/start
-curl 'http://127.0.0.1:8000/conversation/events?after=0'
-```
-
-Copy the returned session ID into:
-
-```bash
-curl -X POST http://127.0.0.1:8000/transcript \
+curl -X POST http://127.0.0.1:8000/utterance \
   -H 'Content-Type: application/json' \
   -d '{"chunk_id":"demo:1","text":"What kinds of AR tools are you exploring?"}'
-
-curl -X POST http://127.0.0.1:8000/conversation/research \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "session_id":"PASTE_SESSION_ID",
-    "person_id":"demo-person",
-    "profile":{"name":"Demo Person"},
-    "verbose_research":"Demo Person builds developer tools and is interested in AR.",
-    "concise_research":["Builds developer tools","Interested in AR"]
-  }'
-
-curl 'http://127.0.0.1:8000/conversation/events?after=0'
+curl 'http://127.0.0.1:8000/conversation/panel1'
+curl 'http://127.0.0.1:8000/conversation/panel2'
 curl -X POST http://127.0.0.1:8000/conversation/stop
 ```
 
