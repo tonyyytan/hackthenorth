@@ -57,6 +57,7 @@ _inflight = set()
 _media = {}  # pid -> (jpeg, wav) from the latest utterance
 _lock = threading.Lock()
 _pool = ThreadPoolExecutor(max_workers=2)
+_last_pid = None  # most recently updated cache entry -- for the no-camera debug overlay
 
 
 def _load_server_env():
@@ -154,22 +155,33 @@ def _work(pid, prompt):
         image, audio = _media.get(pid, (None, None))
         try:
             got = parse(_ask_omni(prompt, image, audio))
-        except Exception:
-            got = None                                # OMNI down / out of credits
-        got = got or parse(_ask(prompt, image))
+        except Exception as e:
+            print(f"brain: OMNI call failed for {pid}: {e}")  # OMNI down / out of credits
+            got = None
+        if not got:
+            try:
+                got = parse(_ask(prompt, image))
+            except Exception as e:
+                print(f"brain: Claude fallback failed for {pid}: {e}")
         if got:
             with _lock:
                 _cache[pid] = got
-    except Exception:
-        pass                                          # stale cache is the fallback
+                global _last_pid
+                _last_pid = pid
+        else:
+            print(f"brain: no insight produced for {pid} (both providers returned nothing usable)")
+    except Exception as e:
+        print(f"brain: unexpected error for {pid}: {e}")  # stale cache is the fallback
     finally:
         with _lock:
             _inflight.discard(pid)
 
 
-def add_utterance(pid, text, profile=None, now=None, ask=None, image=None, audio=None):
+def add_utterance(pid, text, profile=None, now=None, ask=None, image=None, audio=None, force=False):
     """Buffer a line; fire a call when it is worth one. Returns True if fired.
-    image/audio (jpeg/wav bytes) are kept as the latest media for OMNI."""
+    image/audio (jpeg/wav bytes) are kept as the latest media for OMNI.
+    force=True skips the batching gate entirely -- for manual/demo triggering
+    (talk.py, curl) where you want an answer from one typed line, not four."""
     now = time.time() if now is None else now
     if not pid or not (text or "").strip():
         return False
@@ -180,7 +192,7 @@ def add_utterance(pid, text, profile=None, now=None, ask=None, image=None, audio
         n = len(_buffers[pid])
         # The time trigger only applies once we've fired before, otherwise the very
         # first utterance looks infinitely overdue and burns a call on one line.
-        due = n % FIRE_EVERY == 0 or (pid in _fired and now - _fired[pid] >= FIRE_AFTER)
+        due = force or n % FIRE_EVERY == 0 or (pid in _fired and now - _fired[pid] >= FIRE_AFTER)
         if not due or pid in _inflight:
             return False
         _fired[pid] = now
@@ -204,10 +216,20 @@ def _work_sync(pid, raw):
         _inflight.discard(pid)
         if got:
             _cache[pid] = got
+            global _last_pid
+            _last_pid = pid
 
 
 def get(pid):
     return _cache.get(pid)
+
+
+def latest():
+    """(person_id, insight) most recently generated, for the no-camera debug overlay --
+    lets the Quest show real generated content without a working face match."""
+    with _lock:
+        pid = _last_pid
+    return (pid, _cache.get(pid)) if pid else (None, None)
 
 
 if __name__ == "__main__":

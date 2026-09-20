@@ -14,7 +14,9 @@ import base64
 import json
 import math
 import os
+import socket
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
 import warnings
@@ -252,7 +254,9 @@ async def utterance(msg: dict):
     """{"person_id": "alana-goyal", "text": "..."} from the Pi, or {"audio_b64": <wav>}
     from the Quest mic. person_id defaults to whoever is biggest in frame (FOCUS);
     audio without text is transcribed by OpenAI. The insight call runs in the
-    background -- only the transcription is waited on."""
+    background -- only the transcription is waited on.
+    "force": true skips the normal 4-utterances/15s batching gate -- for manual
+    testing/demoing (see talk.py) where one typed line should get an answer now."""
     pid = msg.get("person_id") or FOCUS
     audio = base64.b64decode(msg["audio_b64"]) if msg.get("audio_b64") else None
     text = msg.get("text") or ""
@@ -263,7 +267,8 @@ async def utterance(msg: dict):
             return {"ok": False, "person_id": pid, "text": "", "error": f"stt: {e}"}
     photo = PHOTOS.get(pid)
     image = cv2.imencode(".jpg", photo)[1].tobytes() if photo is not None and photo.size else None
-    fired = brain.add_utterance(pid, text, PROFILES.get(pid), image=image, audio=audio)
+    fired = brain.add_utterance(pid, text, PROFILES.get(pid), image=image, audio=audio,
+                                 force=bool(msg.get("force")))
     return {"ok": True, "person_id": pid, "text": text, "fired": fired, "insight": brain.get(pid)}
 
 
@@ -278,6 +283,15 @@ async def reload():
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
 
 
+@api.get("/debug/latest_insight")
+async def latest_insight():
+    """Whatever talk.py (or the Pi) most recently generated, for anyone -- lets
+    DebugInsightOverlay.cs show real LLM output in-headset with no working face
+    match at all (no printed photo, PassthroughCameraAccess not working over Link, etc)."""
+    pid, insight = brain.latest()
+    return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None}
+
+
 @api.get("/health")
 async def health():
     return {
@@ -288,10 +302,30 @@ async def health():
     }
 
 
+DISCOVERY_PORT = 41234
+DISCOVERY_MAGIC = b"HACKTHENORTH_ID_SERVER:8000"
+
+
+def _broadcast_presence():
+    """So ServerDiscovery.cs on the Quest can find this server without anyone hand-typing
+    or updating a LAN IP -- broadcasts "I'm here, port 8000" on the local subnet every
+    second. Harmless if nobody's listening; this is the thing that survives venue Wi-Fi
+    handing out a different IP than last time."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    while True:
+        try:
+            sock.sendto(DISCOVERY_MAGIC, ("255.255.255.255", DISCOVERY_PORT))
+        except OSError:
+            pass  # network briefly down (e.g. Wi-Fi reconnecting) -- keep trying
+        time.sleep(1.0)
+
+
 if __name__ == "__main__":
-    import socket
     import uvicorn
     lan = socket.gethostbyname(socket.gethostname())
     print(f"{len(NAMES)} enrolled: {', '.join(NAMES) or 'nobody'}")
     print(f"Quest posts to  http://{lan}:8000/id?frame_id=N   (NOT localhost)")
-    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="warning")
+    print(f"Broadcasting presence on UDP {DISCOVERY_PORT} for auto-discovery")
+    threading.Thread(target=_broadcast_presence, daemon=True).start()
+    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info")

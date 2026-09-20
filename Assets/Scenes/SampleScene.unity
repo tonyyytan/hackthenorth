@@ -1631,7 +1631,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.UI.SpeakerCaptionBox
   followTarget: {fileID: 0}
   anchorMode: 2
-  localOffset: {x: 0.42, y: 0.24, z: 1.1}
+  localOffset: {x: 0.28, y: 0.16, z: 1.1}
   positionSmoothTime: 0.15
   rotationSmoothSpeed: 8
   faceCamera: {fileID: 0}
@@ -1829,6 +1829,8 @@ GameObject:
   - component: {fileID: 1888136644}
   - component: {fileID: 1888136643}
   - component: {fileID: 1888136648}
+  - component: {fileID: 1888136650}
+  - component: {fileID: 1888136649}
   m_Layer: 0
   m_Name: SegmentationTracking
   m_TagString: Untagged
@@ -1921,8 +1923,46 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Tracking.TrackedCaptionSpawner
   registry: {fileID: 1888136644}
-  worldOffset: {x: 0, y: 0.15, z: 0}
+  lateralOffset: 0.5
+  verticalOffset: 0.35
   faceCamera: {fileID: 1231979745}
+--- !u!114 &1888136649
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1888136642}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 623637e83f228684f9af064725e17761, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Identity.FaceIdClient
+  serverUrl: http://192.168.1.100:8000
+  cameraAccess: {fileID: 1888136650}
+  raycastManager: {fileID: 1888136645}
+  registry: {fileID: 1888136644}
+  spawner: {fileID: 1888136648}
+  jpegQuality: 70
+  fallbackDistance: 1.5
+  maxInFlight: 2
+--- !u!114 &1888136650
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1888136642}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ef9a7893e57c04c0db4114c70954b915, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: meta.xr.mrutilitykit::Meta.XR.PassthroughCameraAccess
+  CameraPosition: 0
+  RequestedResolution: {x: 1280, y: 960}
+  _maxFramerate: 60
+  TargetMaterial: {fileID: 0}
+  _texturePropertyName: 
 --- !u!1 &1893776409
 GameObject:
   m_ObjectHideFlags: 0

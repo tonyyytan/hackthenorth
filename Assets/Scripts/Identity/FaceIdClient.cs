@@ -37,6 +37,10 @@ namespace HackTheNorth.Identity
 
         public string ServerUrl => serverUrl;
 
+        /// <summary>Overrides the configured server address — used by ServerDiscovery so nobody
+        /// has to hand-type/update a LAN IP that changes every time the venue's Wi-Fi does.</summary>
+        public void SetServerUrl(string url) => serverUrl = url;
+
         private int frameId, lastPlaced, inFlight;
         private float retryAt;
         private int statCount;
