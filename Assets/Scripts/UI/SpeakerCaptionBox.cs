@@ -49,6 +49,7 @@ namespace HackTheNorth.UI
         private CanvasGroup canvasGroup;
         private Vector3 velocity;
         private Vector3 baseScale;
+        private string revealTarget; // the full message we're showing/typing toward -- NOT messageLabel.text, which is only partial mid-typewriter
         private Coroutine fadeRoutine;
         private Coroutine autoHideRoutine;
         private Coroutine typeRoutine;
@@ -114,25 +115,28 @@ namespace HackTheNorth.UI
             if (speakerNameLabel != null) speakerNameLabel.text = speakerName;
             RevealMessage(message);
 
-            FadeTo(1f);
+            // Only play the pop-in animation when actually transitioning from hidden to
+            // shown. Callers like FaceIdClient/DesktopPipelinePreview call ShowDialogue on
+            // every poll (many times/sec on-device) even when nothing changed -- without this
+            // guard the box would replay its entrance animation continuously instead of
+            // settling, which is exactly the "playing over and over" bug this fixes.
+            if (canvasGroup.alpha < 0.99f) FadeTo(1f);
 
-            if (autoHideDelay > 0f)
-            {
-                if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
-                autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
-            }
+            RestartAutoHideTimer();
         }
 
         /// <summary>Update just the message text of an already-visible box (e.g. streaming transcript).</summary>
         public void UpdateMessage(string message)
         {
             RevealMessage(message);
+            RestartAutoHideTimer();
+        }
 
-            if (autoHideDelay > 0f)
-            {
-                if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
-                autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
-            }
+        private void RestartAutoHideTimer()
+        {
+            if (autoHideDelay <= 0f) return;
+            if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
+            autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
         }
 
         /// <summary>
@@ -146,8 +150,16 @@ namespace HackTheNorth.UI
             if (messageLabel == null) return;
             message ??= string.Empty;
 
+            // Compare against the TARGET we were last asked to show, not messageLabel.text --
+            // that's only partially typed while a reveal is in progress, so comparing against
+            // it made every repeated call (e.g. a poll loop calling ShowDialogue every 0.5s
+            // with unchanged content) look like "new" text and restart the typewriter from
+            // scratch forever, never letting it finish.
+            if (message == revealTarget) return;
+            revealTarget = message;
+
             if (typeRoutine != null) StopCoroutine(typeRoutine);
-            if (typewriterCharsPerSec <= 0f || message == messageLabel.text)
+            if (typewriterCharsPerSec <= 0f)
             {
                 messageLabel.text = message;
                 return;
@@ -178,6 +190,10 @@ namespace HackTheNorth.UI
             }
             FadeTo(0f);
         }
+
+        /// <summary>0 = show text instantly, no typewriter effect. Useful for test/debug
+        /// tools where rapid re-triggering would otherwise fight the reveal animation.</summary>
+        public void SetTypewriterSpeed(float charsPerSec) => typewriterCharsPerSec = charsPerSec;
 
         public void SetFollowTarget(Transform target)
         {

@@ -37,6 +37,12 @@ namespace HackTheNorth.Identity
         [Tooltip("Frames uploading/processing at once. 2 hides network time behind server time; more just queues on the server.")]
         [SerializeField, Range(1, 3)] private int maxInFlight = 2;
 
+        // STABLE CONTRACT (matches quest/module.py's locked GET /conversation/panel1|2):
+        // fixed 0.5s cadence, deliberately, so the wearer sees content change at a readable
+        // pace rather than at whatever rate frame detection happens to run -- panel content
+        // and frame-detection rate are two different clocks on purpose.
+        private const float PanelPollInterval = 0.5f;
+
         public string ServerUrl => serverUrl;
 
         /// <summary>Overrides the configured server address — used by ServerDiscovery so nobody
@@ -86,6 +92,71 @@ namespace HackTheNorth.Identity
                 }
                 // Don't wait for the reply: the next frame uploads while the server works on this one.
                 StartCoroutine(Send(id, encode.Result, pose, size));
+            }
+        }
+
+        private void Awake() => StartCoroutine(PanelPollLoop());
+
+        // Fixed-cadence content updates, independent of the frame-detection loop above (which
+        // runs at whatever rate the server can handle, ~10-13/s) -- panel1/panel2 are polled
+        // strictly every 0.5s so content changes at a pace the wearer can actually read, not
+        // however fast/erratically frames happen to round-trip.
+        private IEnumerator PanelPollLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(PanelPollInterval);
+                if (string.IsNullOrEmpty(serverUrl)) continue;
+
+                yield return FetchJson($"{serverUrl}/conversation/panel1", ApplyPanel1);
+                yield return FetchJson($"{serverUrl}/conversation/panel2", ApplyPanel2);
+            }
+        }
+
+        private IEnumerator FetchJson(string url, Action<string> onSuccess)
+        {
+            using var req = UnityWebRequest.Get(url);
+            yield return req.SendWebRequest();
+            if (req.result == UnityWebRequest.Result.Success) onSuccess(req.downloadHandler.text);
+        }
+
+        private void ApplyPanel1(string json)
+        {
+            var res = JsonUtility.FromJson<Panel1Response>(json);
+            if (string.IsNullOrEmpty(res.person_id)) return;
+            if (!registry.TryGet(res.person_id, out _)) return; // no known position for them yet -- wait for /id to place one
+
+            string displayName = string.IsNullOrEmpty(res.profile?.name) ? res.person_id : res.profile.name;
+            string body = ProfileBullets(res.profile);
+            if (string.IsNullOrEmpty(body)) return;
+
+            var box = spawner.GetOrCreateProfileBox(res.person_id);
+            box?.ShowDialogue(displayName, body);
+        }
+
+        private void ApplyPanel2(string json)
+        {
+            var res = JsonUtility.FromJson<Panel2Response>(json);
+            if (string.IsNullOrEmpty(res.person_id)) return;
+            if (!registry.TryGet(res.person_id, out _)) return;
+
+            var box = spawner.GetOrCreateInsightBox(res.person_id);
+            if (box == null) return;
+
+            if (res.researching)
+            {
+                box.ShowDialogue("Researching", "...");
+                return;
+            }
+            string body = InsightBody(res.insight);
+            if (!string.IsNullOrEmpty(body))
+            {
+                bool firstReveal = insightRevealedOnce.Add(res.person_id);
+                box.ShowDialogue(firstReveal ? "Continue conversation!" : "Worth asking", body);
+            }
+            else
+            {
+                box.ShowDialogue("Listening", "Say something to get started");
             }
         }
 
@@ -158,43 +229,15 @@ namespace HackTheNorth.Identity
                     : ray.GetPoint(f.distance_m > 0 ? f.distance_m : fallbackDistance);
 
                 registry.Update(f.name, point);
-                string displayName = string.IsNullOrEmpty(f.profile?.name) ? f.name : f.profile.name;
 
-                // Two separate panels (Cluely-style split) instead of one box carrying
-                // everything: profile facts change rarely, insight updates continuously as
-                // the conversation goes -- mixing them in one box meant the whole thing
-                // re-triggered the typewriter reveal every time either half changed.
-                string profileBody = ProfileBullets(f);
-                if (!string.IsNullOrEmpty(profileBody))
-                {
-                    var profileBox = spawner.GetOrCreateProfileBox(f.name);
-                    profileBox?.ShowDialogue(displayName, profileBody);
-                }
-
-                // Always show the insight box (Cluely's own "Listening..." bubble is always
-                // present too) with one of four states, rather than only appearing once real
-                // content exists -- the wearer should always know whether the assistant is
-                // idle, actively working, or just produced something new.
-                var insightBox = spawner.GetOrCreateInsightBox(f.name);
-                if (insightBox != null)
-                {
-                    string insightBody = InsightBody(f);
-                    if (f.researching)
-                    {
-                        insightBox.ShowDialogue("Researching", "...");
-                    }
-                    else if (!string.IsNullOrEmpty(insightBody))
-                    {
-                        // First time content ever lands for this person: a brief, more
-                        // attention-grabbing header, then settle into the steady-state label.
-                        bool firstReveal = insightRevealedOnce.Add(f.name);
-                        insightBox.ShowDialogue(firstReveal ? "Continue conversation!" : "Worth asking", insightBody);
-                    }
-                    else
-                    {
-                        insightBox.ShowDialogue("Listening", "Say something to get started");
-                    }
-                }
+                // Content is NOT set here anymore -- PanelPollLoop (fixed 0.5s cadence, see
+                // above) owns that exclusively now, polling the same locked /conversation/
+                // panel1|2 endpoints the Pi/any other client would. This call just ensures a
+                // box EXISTS and is positioned for this person; two code paths independently
+                // calling ShowDialogue() on the same box caused the "animation replays
+                // constantly" bug we hit earlier tonight -- one writer only, from here on.
+                spawner.GetOrCreateProfileBox(f.name);
+                spawner.GetOrCreateInsightBox(f.name);
 
                 shown.Add(f.name);
             }
@@ -202,23 +245,23 @@ namespace HackTheNorth.Identity
 
         // Static-ish facts about the person, as bullet points -- role/what they're working on/
         // what they're looking for. Falls back to the opener line if nothing else is known yet.
-        private static string ProfileBullets(Face f)
+        private static string ProfileBullets(Profile profile)
         {
-            var lines = new[] { f.profile?.role, f.profile?.working_on, f.profile?.looking_for }
+            var lines = new[] { profile?.role, profile?.working_on, profile?.looking_for }
                 .Where(s => !string.IsNullOrEmpty(s))
                 .Select(s => $"• {s}")
                 .ToList();
-            if (lines.Count == 0 && !string.IsNullOrEmpty(f.profile?.opener)) lines.Add(f.profile.opener);
+            if (lines.Count == 0 && !string.IsNullOrEmpty(profile?.opener)) lines.Add(profile.opener);
             return string.Join("\n", lines);
         }
 
         // Live conversational suggestions from brain.py -- what they're talking about right
         // now, and a specific question worth asking next. Only meaningful once the
         // conversation has actually produced something (see brain.py's batching gate).
-        private static string InsightBody(Face f) => string.Join("\n", new[]
+        private static string InsightBody(Insight insight) => string.Join("\n", new[]
         {
-            f.insight?.topic,
-            f.insight?.suggested_question,
+            insight?.topic,
+            insight?.suggested_question,
         }.Where(s => !string.IsNullOrEmpty(s)));
 
         // Measured from the camera's own rays, so it stays right whatever resolution is picked.
@@ -239,5 +282,9 @@ namespace HackTheNorth.Identity
         }
         [Serializable] private class Profile { public string name, role, bio, links, working_on, looking_for, research, opener; }
         [Serializable] private class Insight { public string topic, shared_interest, suggested_question; }
+
+        // Mirrors GET /conversation/panel1|2 -- the locked, must-survive-any-refactor contract.
+        [Serializable] private class Panel1Response { public string person_id; public Profile profile; }
+        [Serializable] private class Panel2Response { public string person_id; public Insight insight; public bool researching; }
     }
 }

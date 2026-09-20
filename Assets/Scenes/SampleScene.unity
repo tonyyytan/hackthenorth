@@ -2171,7 +2171,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &958222564
 Transform:
   m_ObjectHideFlags: 0
@@ -4914,7 +4914,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 623637e83f228684f9af064725e17761, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::HackTheNorth.Identity.FaceIdClient
-  serverUrl: http://192.168.2.14:8000
+  serverUrl: http://10.37.126.123:8000
   cameraAccess: {fileID: 1888136650}
   raycastManager: {fileID: 1888136645}
   registry: {fileID: 1888136644}
@@ -5489,7 +5489,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &2050659592
 Transform:
   m_ObjectHideFlags: 0

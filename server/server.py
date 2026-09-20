@@ -647,7 +647,8 @@ def identify(jpeg, frame_id, hfov):
                    "score": t["score"], "bbox": t["bbox"],
                    "distance_m": distance_m(t["bbox"][2] - t["bbox"][0], img.shape[1], hfov),
                    "profile": PROFILES.get(t["name"] or t["badge"]),
-                   "insight": brain.get(t["name"] or t["badge"])} for t in fresh],
+                   "insight": brain.get(t["name"] or t["badge"]),
+                   "researching": brain.is_researching(t["name"] or t["badge"])} for t in fresh],
         "ms": {"detect": round((t_det - t0) * 1000), "total": round((t_end - t0) * 1000)},
         "embedded": n_embedded,
     }
@@ -807,13 +808,35 @@ async def reload():
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
 
 
+# STABLE CONTRACT -- do not rename/remove these two, whatever else changes in this file.
+# The Quest polls both every ~0.5s. Together with POST /id (frame capture, above), this is
+# the complete, locked interface the headset depends on:
+#   POST /id                    -- camera frame in, recognized faces out
+#   GET  /conversation/panel1   -- top panel: bullet-point facts about the person in view
+#   GET  /conversation/panel2   -- bottom panel: live conversational suggestion/tip
+@api.get("/conversation/panel1")
+async def conversation_panel1():
+    """Top panel: bullet-point facts about whoever the Quest currently has in view (FOCUS)."""
+    pid = FOCUS
+    return {"person_id": pid, "profile": PROFILES.get(pid) if pid else None}
+
+
+@api.get("/conversation/panel2")
+async def conversation_panel2():
+    """Bottom panel: live conversational suggestion for whoever the Quest currently has in view."""
+    pid = FOCUS
+    return {"person_id": pid, "insight": brain.get(pid) if pid else None,
+            "researching": brain.is_researching(pid) if pid else False}
+
+
 @api.get("/debug/latest_insight")
 async def latest_insight():
     """Whatever talk.py (or the Pi) most recently generated, for anyone -- lets
     DebugInsightOverlay.cs show real LLM output in-headset with no working face
     match at all (no printed photo, PassthroughCameraAccess not working over Link, etc)."""
     pid, insight = brain.latest()
-    return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None}
+    return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None,
+            "researching": brain.is_researching(pid) if pid else False}
 
 
 @api.get("/health")
