@@ -53,17 +53,11 @@ screenshot instead of the image posted by the Quest:
 python3 -m server.server --log-no-picture
 ```
 
-Both flags enable the same pipeline logging. `--log-no-picture` preloads the fixed
-Ashley screenshot so no Quest `/id` request is required, and also replaces every image
-posted to `/id` with that screenshot. Pipeline lines are tagged
+Both flags enable the same pipeline logging. `--log-no-picture` additionally replaces
+every image posted to `/id` with the fixed Ashley screenshot. Pipeline lines are tagged
 as `trigger_detected`, `image_parsed`, `research_context`, `panel1_update`, and
 `panel2_update`; failures are tagged `pipeline_error`. Research logs intentionally
 include the full verbose model context.
-
-The first panel-two result is generated immediately after research is ready. Subsequent
-updates wait at least `TALKING_POINT_REFRESH_SECONDS` after the previous result was
-published (10 seconds by default), so slow Gemini calls cannot create back-to-back
-updates.
 
 Repeated requests from the same client IP to the same method/path are logged at most
 once every 0.5 seconds, with suppressed repeats counted on the next line. This interval
