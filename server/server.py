@@ -76,6 +76,10 @@ TALKING_POINTS_SCHEMA = {
 }
 
 
+GEMINI_SYSTEM_PROMPT_PATH = SERVER_DIR / "gemini_system_prompt.md"
+GEMINI_SYSTEM_PROMPT = GEMINI_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
+
 def load_server_env():
     """Load server/.env without adding another configuration dependency."""
     path = SERVER_DIR / ".env"
@@ -151,11 +155,9 @@ def _gemini_json(prompt):
 def generate_talking_points(person_id, profile, research, transcript):
     max_chars = int(os.environ.get("TALKING_POINT_TRANSCRIPT_CHARS", "16000"))
     transcript_text = "\n".join(transcript)[-max_chars:]
-    prompt = f"""You are a discreet live networking copilot. Suggest what the wearer
-could discuss next with this person. Use the live conversation as the strongest
-signal and the research only as supporting context. Never invent shared interests
-or claim the wearer knows something that was not said. Avoid repeating points the
-conversation already covered.
+    prompt = f"""{GEMINI_SYSTEM_PROMPT}
+
+## Current Context
 
 Person ID: {person_id}
 Profile: {json.dumps(profile or {}, ensure_ascii=False)}
