@@ -1,13 +1,15 @@
 """Networking assistant server.
 
 Conversation integration:
-    POST /transcript                 already-transcribed text chunks from the Pi
-    GET  /conversation/events        commands/results for external components
-    POST /conversation/research      face/research component returns its result
+    POST /utterance                  already-transcribed text chunks from the Pi
+    GET  /conversation/panel1         cached concise person research for the Quest
+    GET  /conversation/panel2         generated live talking points for the Quest
+    GET  /conversation/events         ordered diagnostic/event feed
 
-The Pi owns audio capture/transcription. A separate component owns face segmentation,
-identity lookup, and online research. This server owns conversation state and periodic
-talking-point generation.
+The Pi owns audio capture/transcription. The Quest continuously sends camera frames to
+POST /id. At conversation start, the server uses the newest of those frames to identify
+the person and loads their precomputed verbose_research and concise_research from
+people.db. The server owns conversation state and periodic talking-point generation.
 
 The existing identity endpoint remains available:
 
@@ -22,6 +24,7 @@ The filename/foldername is the canonical person id everywhere in the system.
 Run from the repository root: python3 -m server.server
 """
 import base64
+import argparse
 import json
 import math
 import os
@@ -44,13 +47,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if PROJECT_ROOT.name == "server":
     PROJECT_ROOT = PROJECT_ROOT.parent
 SERVER_DIR = PROJECT_ROOT / "server"
+SEARCH_DIR = PROJECT_ROOT / "search"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(SEARCH_DIR) not in sys.path:
+    sys.path.insert(0, str(SEARCH_DIR))
 
 import cv2
 import numpy as np
 
-import badge
 import brain
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -180,13 +185,15 @@ class ConversationManager:
         refresh_seconds=None,
         start_phrases=None,
         end_phrases=None,
+        identity_resolver=None,
     ):
         self.generate = talking_point_generator
+        self.resolve_identity = identity_resolver
         self.start_phrases = start_phrases or _parse_phrases(
             "CONVERSATION_START_PHRASES", "start conversation"
         )
         self.end_phrases = end_phrases or _parse_phrases(
-            "CONVERSATION_END_PHRASES", "bye,goodbye,end conversation"
+            "CONVERSATION_END_PHRASES", "bye,goodbye,see you later,end conversation"
         )
         self.refresh_seconds = float(
             refresh_seconds
@@ -255,10 +262,7 @@ class ConversationManager:
             self.trigger_tail = f"{self.trigger_tail} {text}"[-tail_size:]
 
         if not active and trigger:
-            self.start("trigger", trigger)
-            if trigger_remainder:
-                with self.lock:
-                    self.session["transcript"].append(trigger_remainder)
+            self.start("trigger", trigger, initial_transcript=trigger_remainder)
         elif active and trigger:
             self.stop("trigger", trigger)
         else:
@@ -268,14 +272,14 @@ class ConversationManager:
                     self.wake.set()
         return self.state()
 
-    def start(self, source="manual", trigger=None):
+    def start(self, source="manual", trigger=None, initial_transcript=None):
         with self.lock:
             if self.session is not None:
                 self._end_locked("restarted")
             self.session = {
                 "id": uuid.uuid4().hex,
                 "started_at": time.time(),
-                "transcript": [],
+                "transcript": [initial_transcript] if initial_transcript else [],
                 "person_id": None,
                 "profile": {},
                 "research": None,
@@ -283,13 +287,59 @@ class ConversationManager:
                 "last_generation_started": 0.0,
                 "next_generation_at": 0.0,
                 "talking_points_version": 0,
+                "talking_points": None,
                 "last_error": None,
             }
             self.trigger_tail = ""
             self._publish_locked("conversation_started", source=source, trigger=trigger)
             self._publish_locked("identify_and_research_requested")
             self.wake.set()
-            return self.session["id"]
+            session_id = self.session["id"]
+            resolver = self.resolve_identity
+        if resolver is not None:
+            self.workers.submit(self._identity_worker, session_id, resolver)
+        return session_id
+
+    def set_identity_resolver(self, resolver):
+        """Install the latest-frame resolver after the identity service is initialized."""
+        with self.lock:
+            self.resolve_identity = resolver
+
+    def _identity_worker(self, session_id, resolver):
+        """Resolve the newest Quest frame without blocking transcript ingestion."""
+        try:
+            result = resolver()
+        except Exception as error:
+            self._fail_identification(session_id, f"{type(error).__name__}: {error}")
+            return
+        if not result:
+            self._fail_identification(session_id, "no enrolled person matched the latest frame")
+            return
+        accepted, error = self.provide_research(
+            session_id=session_id,
+            person_id=result["person_id"],
+            profile=result["profile"],
+            verbose=result["verbose"],
+            concise=result["concise"],
+            sources=result.get("sources"),
+        )
+        # A stale worker or a competing accepted result is harmless. Other failures mean
+        # there is no usable research context, so leave conversation mode and blank panels.
+        if not accepted and error not in {
+            "session_id is missing or stale",
+            "no active conversation",
+            "research already received for this conversation",
+        }:
+            self._fail_identification(session_id, error)
+
+    def _fail_identification(self, session_id, message):
+        with self.lock:
+            if self._current_locked(session_id) is None:
+                return
+            self.session["last_error"] = message
+            self._publish_locked("conversation_error", stage="identity", message=message)
+            self._end_locked("identity_not_found")
+            self.wake.set()
 
     def stop(self, reason="manual", trigger=None):
         with self.lock:
@@ -389,6 +439,7 @@ class ConversationManager:
             session["generation_inflight"] = False
             session["next_generation_at"] = 0.0
             session["talking_points_version"] += 1
+            session["talking_points"] = dict(points)
             session["last_error"] = None
             self._publish_locked(
                 "talking_points_ready",
@@ -399,6 +450,47 @@ class ConversationManager:
                 suggested_question=points.get("suggested_question", ""),
             )
             self.wake.set()
+
+    def panel_one(self):
+        """Quest polling payload for concise person research; inactive means blank text."""
+        with self.lock:
+            session = self.session
+            if session is None or session["research"] is None:
+                return {
+                    "text": "", "session_id": None, "person_id": None, "bullets": []
+                }
+            bullets = list(session["research"]["concise"])
+            return {
+                "text": "\n".join(f"• {item}" for item in bullets),
+                "session_id": session["id"],
+                "person_id": session["person_id"],
+                "display_name": session["profile"].get("name") or session["person_id"],
+                "bullets": bullets,
+            }
+
+    def panel_two(self):
+        """Quest polling payload for generated talking points; inactive means blank text."""
+        with self.lock:
+            session = self.session
+            points = session.get("talking_points") if session is not None else None
+            if session is None or not points:
+                return {
+                    "text": "", "session_id": None, "person_id": None,
+                    "headline": "", "talking_points": [], "suggested_question": "",
+                    "version": 0,
+                }
+            lines = [points.get("headline", ""), *points.get("talking_points", [])]
+            if points.get("suggested_question"):
+                lines.append(points["suggested_question"])
+            return {
+                "text": "\n".join(item for item in lines if item),
+                "session_id": session["id"],
+                "person_id": session["person_id"],
+                "headline": points.get("headline", ""),
+                "talking_points": list(points.get("talking_points", [])),
+                "suggested_question": points.get("suggested_question", ""),
+                "version": session["talking_points_version"],
+            }
 
     def _current_locked(self, session_id):
         return self.session if self.session is not None and self.session["id"] == session_id else None
@@ -469,6 +561,68 @@ app_fa = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"],
                       allowed_modules=["detection", "recognition"])
 app_fa.prepare(ctx_id=-1, det_size=(DET_SIZE, DET_SIZE))
 api = FastAPI()
+
+
+class RequestLogLimiter:
+    """Thread-safe duplicate-log limiter; never delays or rejects an HTTP request."""
+
+    def __init__(self, interval_seconds=0.5):
+        self.interval_seconds = max(float(interval_seconds), 0.0)
+        self.lock = threading.Lock()
+        self.entries = {}
+
+    def record(self, source, method, path, now=None):
+        """Return suppressed-repeat count when this request should log, else None."""
+        now = time.monotonic() if now is None else now
+        key = (source, method, path)
+        with self.lock:
+            previous = self.entries.get(key)
+            if previous is not None and now - previous[0] < self.interval_seconds:
+                self.entries[key] = (previous[0], previous[1] + 1)
+                return None
+            suppressed = previous[1] if previous is not None else 0
+            self.entries[key] = (now, 0)
+            return suppressed
+
+
+REQUEST_LOGGING_ENABLED = False
+REQUEST_LOG_LIMITER = RequestLogLimiter()
+
+
+def configure_request_logging(enabled, interval_seconds=0.5):
+    global REQUEST_LOGGING_ENABLED, REQUEST_LOG_LIMITER
+    REQUEST_LOGGING_ENABLED = bool(enabled)
+    REQUEST_LOG_LIMITER = RequestLogLimiter(interval_seconds)
+
+
+@api.middleware("http")
+async def log_http_request(request: Request, call_next):
+    """Optional metadata-only request log enabled by the CLI's --log flag."""
+    if not REQUEST_LOGGING_ENABLED:
+        return await call_next(request)
+
+    source = request.client.host if request.client else "unknown"
+    method = request.method.upper()
+    path = request.url.path
+    query = request.url.query
+    display_target = f"{path}?{query}" if query else path
+    suppressed = REQUEST_LOG_LIMITER.record(source, method, path)
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if suppressed is not None:
+            elapsed_ms = round((time.perf_counter() - started) * 1000)
+            repeats = f" (+{suppressed} suppressed)" if suppressed else ""
+            timestamp = time.strftime("%H:%M:%S")
+            print(
+                f"[http {timestamp}] {source} {method} {display_target} "
+                f"-> {status_code} {elapsed_ms}ms{repeats}",
+                flush=True,
+            )
 
 
 def enroll():
@@ -556,26 +710,14 @@ def iou(a, b):
     return inter / (area(a) + area(b) - inter)
 
 
-# ponytail: OCR costs ~1.5s, so it never runs on the response path. One worker,
-# one attempt per track; the name lands on a later frame. A badge is a fallback
-# for people who never enrolled a face, so late-but-correct beats blocking.
-_ocr_pool = ThreadPoolExecutor(max_workers=1)
-
-
-def badge_roster():
-    """{person_id: display_name} for everyone matchable by name -- badge OCR and the
-    utterance name-matcher both use this. Falls back to a title-cased person_id for
-    anyone with an enrolled face but no people.db profile yet (e.g. faces/thor.jpg with
-    no row in people.db), so matching still works before profiles are seeded."""
-    return {pid: PROFILES.get(pid, {}).get("name") or pid.replace("-", " ").title()
-            for pid in NAMES}
-
-
 # ponytail: one wearer, one camera, so a module-level track list is enough.
 # IOU across frames; if fast head turns break the association, upgrade to CSRT here.
 TRACKS = []  # [{bbox, name, score, last_embedded}]
 PHOTOS = {}  # pid -> latest face+name-tag crop (BGR), the image OMNI sees
 FOCUS = None  # pid of the biggest named face in the latest frame: who you're talking to
+_latest_frame_lock = threading.Lock()
+_latest_frame = None  # newest JPEG posted by the Quest, plus its completed /id result when ready
+_latest_frame_sequence = 0
 
 
 def upper_body(img, bbox):
@@ -609,8 +751,6 @@ def identify(jpeg, frame_id, hfov):
             "name": hit["name"] if hit else None,
             "score": hit["score"] if hit else 0.0,
             "last_embedded": hit["last_embedded"] if hit else 0.0,
-            "badge": hit["badge"] if hit else None,
-            "badge_job": hit["badge_job"] if hit else None,
         })
 
     # Spend the embed budget: never-seen faces first, then the stalest known one.
@@ -624,31 +764,22 @@ def identify(jpeg, frame_id, hfov):
         t["last_embedded"] = now
         n_embedded += 1
 
-    # Badge fallback for anyone the face gallery could not name.
-    for t in fresh:
-        if t["badge_job"] is not None and t["badge_job"].done():
-            t["badge"], _ = t["badge_job"].result()
-            t["badge_job"] = None
-        elif t["badge_job"] is None and not t["name"] and not t["badge"]:
-            t["badge_job"] = _ocr_pool.submit(
-                badge.identify_badge, img.copy(), t["bbox"], badge_roster())
-
     TRACKS[:] = fresh
     global FOCUS
-    named = [t for t in fresh if t["name"] or t["badge"]]  # fresh is biggest-first
-    FOCUS = (named[0]["name"] or named[0]["badge"]) if named else FOCUS
+    named = [t for t in fresh if t["name"]]  # fresh is biggest-first
+    FOCUS = named[0]["name"] if named else FOCUS
     for t in named:
-        PHOTOS[t["name"] or t["badge"]] = upper_body(img, t["bbox"])
+        PHOTOS[t["name"]] = upper_body(img, t["bbox"])
     t_end = time.perf_counter()
     return {
         "frame_id": frame_id,
-        "faces": [{"name": t["name"] or t["badge"],
-                   "method": "face" if t["name"] else "badge" if t["badge"] else None,
+        "faces": [{"name": t["name"],
+                   "method": "face" if t["name"] else None,
                    "score": t["score"], "bbox": t["bbox"],
                    "distance_m": distance_m(t["bbox"][2] - t["bbox"][0], img.shape[1], hfov),
-                   "profile": PROFILES.get(t["name"] or t["badge"]),
-                   "insight": brain.get(t["name"] or t["badge"]),
-                   "researching": brain.is_researching(t["name"] or t["badge"])} for t in fresh],
+                   "profile": PROFILES.get(t["name"]),
+                   "insight": brain.get(t["name"]),
+                   "researching": brain.is_researching(t["name"]) if t["name"] else False} for t in fresh],
         "ms": {"detect": round((t_det - t0) * 1000), "total": round((t_end - t0) * 1000)},
         "embedded": n_embedded,
     }
@@ -670,26 +801,93 @@ def identify_serialized(jpeg, frame_id, hfov):
         return identify(jpeg, frame_id, hfov)
 
 
+def _remember_latest_frame(jpeg, frame_id, hfov):
+    global _latest_frame, _latest_frame_sequence
+    with _latest_frame_lock:
+        _latest_frame_sequence += 1
+        token = _latest_frame_sequence
+        _latest_frame = {
+            "token": token,
+            "jpeg": jpeg,
+            "frame_id": frame_id,
+            "hfov": hfov,
+            "received_at": time.time(),
+            "result": None,
+        }
+        return token
+
+
+def _remember_identity_result(token, result):
+    with _latest_frame_lock:
+        if _latest_frame is not None and _latest_frame["token"] == token:
+            _latest_frame["result"] = result
+
+
+def _research_list(value):
+    """SQLite-friendly concise research: accept JSON arrays or newline-delimited text."""
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, list):
+        return [str(item).strip() for item in decoded if str(item).strip()]
+    return [line.lstrip("-*• ").strip() for line in text.splitlines() if line.strip()]
+
+
+def resolve_latest_frame_research():
+    """Identify the newest Quest frame and return its cached database research.
+
+    The largest recognized face that also has a people.db profile wins. Missing people
+    or missing research intentionally produce no result, which ends conversation mode.
+    """
+    with _latest_frame_lock:
+        frame = dict(_latest_frame) if _latest_frame is not None else None
+    if frame is None:
+        return None
+    result = frame["result"]
+    if result is None:
+        result = identify_serialized(frame["jpeg"], frame["frame_id"], frame["hfov"])
+        _remember_identity_result(frame["token"], result)
+
+    for face in result.get("faces", []):
+        person_id = face.get("name")
+        profile = face.get("profile")
+        if not person_id or not isinstance(profile, dict):
+            continue
+        verbose = str(profile.get("verbose_research") or "").strip()
+        concise = _research_list(profile.get("concise_research"))
+        if not verbose or not concise:
+            continue
+        return {
+            "person_id": person_id,
+            "profile": dict(profile),
+            "verbose": verbose,
+            "concise": concise,
+            "sources": _research_list(profile.get("research_sources")),
+        }
+    return None
+
+
+# ConversationManager is created during server initialization, before the identity
+# functions below are defined. Attach the concrete latest-frame resolver now.
+CONVERSATIONS.set_identity_resolver(resolve_latest_frame_research)
+
+
 @api.post("/id")
 async def post_id(request: Request, frame_id: int = -1, hfov: float = DEFAULT_HFOV):
     try:
         jpeg = await request.body()
-        return await run_in_threadpool(identify_serialized, jpeg, frame_id, hfov)
+        token = _remember_latest_frame(jpeg, frame_id, hfov)
+        result = await run_in_threadpool(identify_serialized, jpeg, frame_id, hfov)
+        _remember_identity_result(token, result)
+        return result
     except Exception as e:
         return {"frame_id": frame_id, "faces": [], "error": str(e)}
-
-
-def _name_from_utterance_text(text):
-    """Support old clients that sent introduction-extraction JSON instead of raw text."""
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    name = data.get("name") if isinstance(data, dict) else None
-    if not name:
-        return None
-    pid, score = badge.match_roster([(name, 1.0)], badge_roster())
-    return pid
 
 
 @api.post("/utterance")
@@ -710,7 +908,7 @@ async def utterance(msg: dict):
 
     # person_id remains for the legacy brain.py demo only. Conversation identity and
     # research arrive independently through POST /conversation/research.
-    pid = msg.get("person_id") or _name_from_utterance_text(text) or FOCUS or "unknown"
+    pid = msg.get("person_id") or FOCUS or "unknown"
 
     # The old one-shot demo remains available when force=true. Live conversation
     # talking points use the session coordinator above, not brain.py's separate buffer.
@@ -727,16 +925,6 @@ async def utterance(msg: dict):
         "insight": brain.get(pid),
         "conversation": conversation,
     }
-
-
-@api.post("/transcript")
-async def transcript(msg: dict):
-    """Receive one already-transcribed chunk from the separate Raspberry Pi component."""
-    text = str(msg.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
-    state = CONVERSATIONS.ingest(text, msg.get("chunk_id"))
-    return {"ok": True, "chunk_id": msg.get("chunk_id"), "state": state}
 
 
 @api.post("/conversation/start")
@@ -805,6 +993,9 @@ async def reload():
     PROFILES = load_profiles()
     TRACKS.clear()
     PHOTOS.clear()
+    with _latest_frame_lock:
+        if _latest_frame is not None:
+            _latest_frame["result"] = None
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
 
 
@@ -873,9 +1064,31 @@ def _broadcast_presence():
 
 if __name__ == "__main__":
     import uvicorn
+    parser = argparse.ArgumentParser(description="Run the networking-assistant server.")
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Log GET/POST request metadata without logging bodies.",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=float,
+        default=0.5,
+        metavar="SECONDS",
+        help="Minimum interval between duplicate log lines per client/method/path (default: 0.5).",
+    )
+    args = parser.parse_args()
+    if args.log_interval < 0:
+        parser.error("--log-interval must be zero or greater")
+    configure_request_logging(args.log, args.log_interval)
+
     lan = socket.gethostbyname(socket.gethostname())
     print(f"{len(NAMES)} enrolled: {', '.join(NAMES) or 'nobody'}")
     print(f"Quest posts to  http://{lan}:8000/id?frame_id=N   (NOT localhost)")
     print(f"Broadcasting presence on UDP {DISCOVERY_PORT} for auto-discovery")
+    if args.log:
+        print(
+            f"HTTP request logging enabled (duplicate interval: {args.log_interval:.3g}s)"
+        )
     threading.Thread(target=_broadcast_presence, daemon=True).start()
-    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info", access_log=False)
