@@ -11,6 +11,7 @@ from .server import (
     _remember_identity_result,
     _remember_latest_frame,
     _research_list,
+    combine_research_context,
     distance_m,
     iou,
     resolve_latest_frame_research,
@@ -190,7 +191,15 @@ def test_latest_identity_populates_and_clears_panels():
         ]
         assert "Long context" not in manager.panel_one()["text"]
         assert manager.panel_two()["talking_points"] == ["Compare headset constraints"]
-        assert generated == [("alex", "Long context", [])]
+        assert generated == [(
+            "alex",
+            "Concise research:\n"
+            "- Builds developer tools\n"
+            "- Interested in spatial computing\n\n"
+            "Verbose research:\n"
+            "Long context",
+            [],
+        )]
 
         manager.ingest("See you later!")
         assert manager.panel_one()["text"] == ""
@@ -221,6 +230,14 @@ def test_failed_identity_ends_conversation_and_blanks_panels():
 def test_research_list_accepts_sqlite_text_formats():
     assert _research_list('["one", "two"]') == ["one", "two"]
     assert _research_list("- one\n• two") == ["one", "two"]
+
+
+def test_combined_research_context_keeps_every_concise_item():
+    concise = [f"Fact {number}" for number in range(1, 8)]
+    combined, normalized = combine_research_context("Raw research", concise)
+    assert normalized == concise
+    assert combined.index("Fact 1") < combined.index("Raw research")
+    assert "Fact 7" in combined
 
 
 def test_latest_frame_resolver_uses_new_database_columns():
@@ -261,6 +278,7 @@ if __name__ == "__main__":
         test_latest_identity_populates_and_clears_panels()
         test_failed_identity_ends_conversation_and_blanks_panels()
         test_research_list_accepts_sqlite_text_formats()
+        test_combined_research_context_keeps_every_concise_item()
         test_latest_frame_resolver_uses_new_database_columns()
         test_request_log_limiter_is_per_source_method_and_path()
         print(f"ok (FACE_WIDTH_M={FACE_WIDTH_M})")

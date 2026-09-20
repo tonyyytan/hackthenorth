@@ -177,6 +177,19 @@ and one natural suggested question under 20 words."""
     }
 
 
+def combine_research_context(verbose, concise):
+    """Put display-friendly facts before raw research for model-facing context."""
+    verbose = str(verbose or "").strip()
+    concise = [concise] if isinstance(concise, str) else concise or []
+    concise = [str(item).strip() for item in concise if str(item).strip()]
+    sections = []
+    if concise:
+        sections.append("Concise research:\n" + "\n".join(f"- {item}" for item in concise))
+    if verbose:
+        sections.append("Verbose research:\n" + verbose)
+    return "\n\n".join(sections), concise
+
+
 class ConversationManager:
     """Thread-safe state machine for one wearer's current conversation."""
 
@@ -359,7 +372,7 @@ class ConversationManager:
         """Accept output from the separate face/database/research component."""
         if not str(verbose or "").strip():
             return False, "verbose_research is required"
-        concise = [concise] if isinstance(concise, str) else concise or []
+        combined_context, concise = combine_research_context(verbose, concise)
         sources = [sources] if isinstance(sources, str) else sources or []
         with self.lock:
             session = self.session
@@ -372,8 +385,8 @@ class ConversationManager:
             session["person_id"] = str(person_id or "unknown")
             session["profile"] = dict(profile or {})
             session["research"] = {
-                "verbose": str(verbose or "").strip(),
-                "concise": [str(item).strip() for item in concise if str(item).strip()][:5],
+                "verbose": combined_context,
+                "concise": concise,
                 "sources": [str(item).strip() for item in sources if str(item).strip()][:8],
             }
             session["last_error"] = None
