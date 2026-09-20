@@ -29,6 +29,11 @@ namespace HackTheNorth.Identity
         private UdpClient discoveryClient;
         private bool everShown;
 
+        // Editor-only tool: no Quest needed to test panel content/animations. Without this
+        // guard it also self-installs in real device builds, spawning a second HUD-locked
+        // pair of boxes on top of TrackedCaptionSpawner's real per-person ones -- the
+        // "extra duplicate boxes" bug seen on-device.
+#if UNITY_EDITOR
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Spawn()
         {
@@ -37,6 +42,7 @@ namespace HackTheNorth.Identity
             DontDestroyOnLoad(go);
             go.AddComponent<DesktopPipelinePreview>();
         }
+#endif
 
         private void Start()
         {
