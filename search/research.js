@@ -1,7 +1,8 @@
 // Person research, precomputed: people.db profile -> Claude researches via Browserbase -> people.db.
 // Browserbase does all the web access: Search API finds pages, Fetch API reads them, and a real
 // cloud browser session renders the JS-heavy ones Fetch can't. Claude only decides what to read.
-// Results land in people.db `research` + `opener`; server.py's SELECT * hands them to brain.py and Unity.
+// Results land in people.db `research` + `bullets` + `opener`; server.py's SELECT * hands them to
+// brain.py and Unity. Every page and search result Browserbase returned is kept whole in `sources`.
 //
 // Usage:
 //   node research.js                     research everyone not yet researched
@@ -41,9 +42,14 @@ const TOOLS = [
       properties: {
         found: { type: "boolean", description: "true only if sources clearly match this name AND role/company" },
         summary: { type: "string", description: "<= 50 words: who they are, what they've built/done recently" },
+        bullets: {
+          type: "array",
+          items: { type: "string" },
+          description: "3-5 bullets, <= 12 words each: role/company, notable work, interests. Caption-sized.",
+        },
         opener: { type: "string", description: "<= 25 words: one specific conversation opener" },
       },
-      required: ["found", "summary", "opener"],
+      required: ["found", "summary", "bullets", "opener"],
     },
   },
 ];
@@ -65,7 +71,7 @@ async function read(url) {
   if (page.statusCode !== 200) return `Blocked or failed (HTTP ${page.statusCode}).`;
   const text = String(page.content || "");
   // ponytail: short Fetch output = page is rendered by JS, so open a real browser; 500 chars is a guess
-  return (text.length > 500 ? text : await browse(url)).slice(0, PAGE_CHARS);
+  return text.length > 500 ? text : await browse(url); // full text; the caller cuts the model's copy
 }
 
 async function browse(url) {
@@ -81,6 +87,7 @@ async function browse(url) {
 }
 
 async function research(profile, log = () => {}) {
+  const sources = []; // raw page text, kept for the sources table
   const client = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
     defaultHeaders: process.env.ANTHROPIC_WORKSPACE_ID
@@ -97,7 +104,8 @@ async function research(profile, log = () => {}) {
         `Today is ${new Date().toDateString()}. I'm about to meet this person at Hack the North 2026:\n` +
         `${known.join("\n")}\n\nSearch for them, read the best 1-3 sources, then call answer. ` +
         "Only use facts from pages about THIS person (same name and role/company); if you can't " +
-        "confirm that, call answer with found=false. Be fast: few searches, few reads, " +
+        "confirm that, call answer with found=false. bullets must be a real array of 3-5 separate "
+        + "strings, not one joined string. Be fast: few searches, few reads, " +
         "and issue independent searches/reads in the same turn.",
     },
   ];
@@ -117,14 +125,17 @@ async function research(profile, log = () => {}) {
 
     const calls = response.content.filter((b) => b.type === "tool_use");
     const done = calls.find((c) => c.name === "answer");
-    if (done) return done.input;
+    if (done) return { ...done.input, sources };
     // parallel calls run at once; all results go back in one message
     const results = await Promise.all(
       calls.map(async (call) => {
         log(`${call.name} ${call.input.query || call.input.url}`);
         try {
-          const content = call.name === "search" ? await search(call.input.query) : await read(call.input.url);
-          return { type: "tool_result", tool_use_id: call.id, content };
+          const isRead = call.name === "read";
+          const full = isRead ? await read(call.input.url) : await search(call.input.query);
+          sources.push({ url: isRead ? call.input.url : `search:${call.input.query}`, text: full });
+          // the model sees a slice; people.db keeps everything Browserbase returned
+          return { type: "tool_result", tool_use_id: call.id, content: isRead ? full.slice(0, PAGE_CHARS) : full };
         } catch (err) {
           return { type: "tool_result", tool_use_id: call.id, content: `Error: ${err.message}`, is_error: true };
         }
@@ -144,9 +155,12 @@ function personId(name) {
 function openDb() {
   const db = new DatabaseSync(path.join(__dirname, "..", "people.db"));
   const cols = db.prepare("PRAGMA table_info(people)").all().map((c) => c.name);
-  for (const col of ["research", "opener"]) {
+  for (const col of ["research", "opener", "bullets"]) {
     if (!cols.includes(col)) db.exec(`ALTER TABLE people ADD COLUMN ${col} TEXT`);
   }
+  // Own table, not a people column: server.py does SELECT * and json.dumps the whole row
+  // into brain.py's prompt, and page text would swamp it.
+  db.exec("CREATE TABLE IF NOT EXISTS sources (id TEXT, url TEXT, text TEXT, fetched_at TEXT)");
   return db;
 }
 
@@ -181,7 +195,9 @@ async function main() {
   }
   console.log(`Researching ${people.length} people, ${PARALLEL} at a time...`);
 
-  const save = db.prepare("UPDATE people SET research = ?, opener = ? WHERE id = ?");
+  const save = db.prepare("UPDATE people SET research = ?, opener = ?, bullets = ? WHERE id = ?");
+  const dropSources = db.prepare("DELETE FROM sources WHERE id = ?");
+  const saveSource = db.prepare("INSERT INTO sources (id, url, text, fetched_at) VALUES (?, ?, ?, datetime('now'))");
   let failed = 0;
   for (let i = 0; i < people.length; i += PARALLEL) {
     await Promise.all(
@@ -190,9 +206,15 @@ async function main() {
         try {
           const r = await research(p, (msg) => console.log(`  [${p.id}] +${((Date.now() - t) / 1000).toFixed(1)}s ${msg}`));
           // found=false stores "" (tried, nothing trustworthy) so a wrong person never reaches the caption
-          save.run(r.found ? r.summary : "", r.found ? r.opener : "", p.id);
+          // the model sometimes swaps string and array for these, and sqlite binds neither undefined nor arrays
+          const text = (v) => (Array.isArray(v) ? v.join("\n") : String(v ?? ""));
+          const bullets = text(r.bullets).split("\n").map((b) => b.replace(/^[-*]\s*/, "").trim()).filter(Boolean).join("\n");
+          save.run(r.found ? text(r.summary) : "", r.found ? text(r.opener) : "", r.found ? bullets : "", p.id);
+          // kept even when found=false: the pages are the record of what was checked
+          dropSources.run(p.id);
+          for (const s of r.sources) saveSource.run(p.id, s.url, s.text);
           console.log(`${r.found ? "OK  " : "MISS"} ${p.id} (${((Date.now() - t) / 1000).toFixed(0)}s)`);
-          if (r.found) console.log(`     ${r.summary}\n     -> ${r.opener}`);
+          if (r.found) console.log([`     ${r.summary}`, ...bullets.split("\n").map((b) => `     - ${b}`), `     -> ${r.opener}`].join("\n"));
         } catch (err) {
           failed++; // left NULL, so the next run retries it
           console.log(`FAIL ${p.id}: ${err.message}`);
