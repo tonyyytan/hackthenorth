@@ -10,8 +10,10 @@ from .server import (
     FACE_WIDTH_M,
     ConversationManager,
     RequestLogLimiter,
+    _parse_talking_point_bullets,
     _remember_identity_result,
     _remember_latest_frame,
+    _render_talking_point,
     _research_list,
     combine_research_context,
     configure_request_logging,
@@ -244,6 +246,20 @@ def test_combined_research_context_keeps_every_concise_item():
     assert "Fact 7" in combined
 
 
+def test_bullet_only_gemini_response_is_parsed_and_rendered_for_quest():
+    points = _parse_talking_point_bullets(
+        "* **Project challenge:** Ask what proved hardest.\n"
+        "- **Future direction:** Ask what they want to explore next."
+    )
+    assert points == [
+        "**Project challenge:** Ask what proved hardest.",
+        "**Future direction:** Ask what they want to explore next.",
+    ]
+    assert _render_talking_point(points[0]) == (
+        "• <b>Project challenge:</b> Ask what proved hardest."
+    )
+
+
 def test_latest_frame_resolver_uses_new_database_columns():
     token = _remember_latest_frame(b"jpeg", 7, 80.0)
     _remember_identity_result(token, {
@@ -335,6 +351,7 @@ if __name__ == "__main__":
         test_failed_identity_ends_conversation_and_blanks_panels()
         test_research_list_accepts_sqlite_text_formats()
         test_combined_research_context_keeps_every_concise_item()
+        test_bullet_only_gemini_response_is_parsed_and_rendered_for_quest()
         test_latest_frame_resolver_uses_new_database_columns()
         test_request_log_limiter_is_per_source_method_and_path()
         test_pipeline_logging_covers_trigger_identity_research_and_panels()
