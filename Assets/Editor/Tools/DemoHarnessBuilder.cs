@@ -83,6 +83,7 @@ namespace HackTheNorth.EditorTools
             // TryGetComponent, not ??: in the editor a missing GetComponent returns a fake-null object.
             if (!go.TryGetComponent(out PassthroughCameraAccess cam)) cam = go.AddComponent<PassthroughCameraAccess>();
             if (!go.TryGetComponent(out HackTheNorth.Identity.FaceIdClient client)) client = go.AddComponent<HackTheNorth.Identity.FaceIdClient>();
+            if (!go.TryGetComponent(out HackTheNorth.Identity.ServerDiscovery discovery)) discovery = go.AddComponent<HackTheNorth.Identity.ServerDiscovery>();
 
             var so = new SerializedObject(client);
             so.FindProperty("cameraAccess").objectReferenceValue = cam;
@@ -91,10 +92,16 @@ namespace HackTheNorth.EditorTools
             so.FindProperty("spawner").objectReferenceValue = spawner;
             so.ApplyModifiedPropertiesWithoutUndo();
 
+            var discoverySo = new SerializedObject(discovery);
+            discoverySo.FindProperty("faceIdClient").objectReferenceValue = client;
+            discoverySo.ApplyModifiedPropertiesWithoutUndo();
+
             EditorUtility.SetDirty(go);
             EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
             EditorSceneManager.SaveOpenScenes();
-            Debug.Log($"AddFaceIdClient: added to {go.name}. Set FaceIdClient.serverUrl to the LAN IP server.py prints.");
+            Debug.Log($"AddFaceIdClient: added to {go.name}. ServerDiscovery will auto-find server.py's " +
+                "LAN address at runtime (see server.py's UDP broadcast) -- serverUrl only matters as a " +
+                "fallback if discovery is blocked (e.g. client-isolated Wi-Fi).");
         }
 
         /// <summary>

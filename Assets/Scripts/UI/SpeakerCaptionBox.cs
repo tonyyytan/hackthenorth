@@ -151,6 +151,14 @@ namespace HackTheNorth.UI
             faceCamera = faceCam;
         }
 
+        /// <summary>Configure this box as a fixed HUD element parented to the camera (see HudLocked).</summary>
+        public void ConfigureHudLocked(Vector3 localOffsetFromCamera)
+        {
+            anchorMode = CaptionAnchorMode.HudLocked;
+            localOffset = localOffsetFromCamera;
+            hudParented = false; // re-parent on the next LateUpdate with this offset
+        }
+
         /// <summary>Runtime-safe wiring for SpeakerCaptionBoxFactory — assigns the TMP labels without needing UnityEditor's SerializedObject.</summary>
         public void Initialize(TMP_Text speakerLabel, TMP_Text messageLabelRef)
         {
