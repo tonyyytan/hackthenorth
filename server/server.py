@@ -256,6 +256,7 @@ class ConversationManager:
                 if len(self.chunk_id_order) > 1000:
                     self.seen_chunk_ids.discard(self.chunk_id_order.popleft())
             active = self.session is not None
+            active_session_id = self.session["id"] if active else None
             phrases = self.end_phrases if active else self.start_phrases
             # Check both joins: chunkers may split at either a word boundary
             # ("start" + "conversation") or inside a word ("con" + "versation").
@@ -275,8 +276,21 @@ class ConversationManager:
             self.trigger_tail = f"{self.trigger_tail} {text}"[-tail_size:]
 
         if not active and trigger:
+            log_pipeline_event(
+                "trigger_detected",
+                action="start",
+                phrase=trigger,
+                chunk_id=chunk_id,
+            )
             self.start("trigger", trigger, initial_transcript=trigger_remainder)
         elif active and trigger:
+            log_pipeline_event(
+                "trigger_detected",
+                action="end",
+                phrase=trigger,
+                chunk_id=chunk_id,
+                session_id=active_session_id,
+            )
             self.stop("trigger", trigger)
         else:
             with self.lock:
@@ -351,6 +365,12 @@ class ConversationManager:
                 return
             self.session["last_error"] = message
             self._publish_locked("conversation_error", stage="identity", message=message)
+            log_pipeline_event(
+                "pipeline_error",
+                session_id=session_id,
+                stage="identity",
+                message=message,
+            )
             self._end_locked("identity_not_found")
             self.wake.set()
 
@@ -363,7 +383,28 @@ class ConversationManager:
             return True
 
     def _end_locked(self, reason, trigger=None):
+        session_id = self.session["id"]
+        person_id = self.session["person_id"]
         self._publish_locked("conversation_ended", reason=reason, trigger=trigger)
+        log_pipeline_event(
+            "panel1_update",
+            session_id=session_id,
+            person_id=person_id,
+            text="",
+            bullets=[],
+            reason="conversation_ended",
+        )
+        log_pipeline_event(
+            "panel2_update",
+            session_id=session_id,
+            person_id=person_id,
+            text="",
+            headline="",
+            talking_points=[],
+            suggested_question="",
+            version=0,
+            reason="conversation_ended",
+        )
         self.session = None
         self.trigger_tail = ""
 
@@ -396,6 +437,22 @@ class ConversationManager:
                 concise=session["research"]["concise"],
                 sources=session["research"]["sources"],
             )
+            panel_one = {
+                "text": "\n".join(f"• {item}" for item in concise),
+                "session_id": session["id"],
+                "person_id": session["person_id"],
+                "display_name": session["profile"].get("name") or session["person_id"],
+                "bullets": list(concise),
+            }
+            log_pipeline_event(
+                "research_context",
+                session_id=session["id"],
+                person_id=session["person_id"],
+                concise=list(concise),
+                verbose=str(verbose).strip(),
+                model_context=combined_context,
+            )
+            log_pipeline_event("panel1_update", **panel_one)
             self._start_generation_locked(session)
             return True, None
 
@@ -443,6 +500,12 @@ class ConversationManager:
                 self._publish_locked(
                     "conversation_error", stage="talking_points", message=session["last_error"]
                 )
+                log_pipeline_event(
+                    "pipeline_error",
+                    session_id=session_id,
+                    stage="talking_points",
+                    message=session["last_error"],
+                )
             return
 
         with self.lock:
@@ -461,6 +524,12 @@ class ConversationManager:
                 headline=points.get("headline", ""),
                 talking_points=points.get("talking_points", []),
                 suggested_question=points.get("suggested_question", ""),
+            )
+            panel_two = self.panel_two()
+            log_pipeline_event(
+                "panel2_update",
+                provider=os.environ.get("TALKING_POINTS_PROVIDER", "gemini"),
+                **panel_two,
             )
             self.wake.set()
 
@@ -600,12 +669,42 @@ class RequestLogLimiter:
 
 REQUEST_LOGGING_ENABLED = False
 REQUEST_LOG_LIMITER = RequestLogLimiter()
+PIPELINE_LOG_LOCK = threading.Lock()
+ASHLEY_IMAGE_PATH = Path(
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33\u202fAM.png"
+)
+IDENTITY_IMAGE_OVERRIDE = None
 
 
 def configure_request_logging(enabled, interval_seconds=0.5):
     global REQUEST_LOGGING_ENABLED, REQUEST_LOG_LIMITER
     REQUEST_LOGGING_ENABLED = bool(enabled)
     REQUEST_LOG_LIMITER = RequestLogLimiter(interval_seconds)
+
+
+def log_pipeline_event(event, **payload):
+    """Print one readable, atomic pipeline event whenever request logging is enabled."""
+    if not REQUEST_LOGGING_ENABLED:
+        return
+    timestamp = time.strftime("%H:%M:%S")
+    details = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    with PIPELINE_LOG_LOCK:
+        print(f"[pipeline {timestamp}] {event}\n{details}", flush=True)
+
+
+def configure_identity_image_override(enabled):
+    """Use Ashley's fixed screenshot instead of the image posted to /id."""
+    global IDENTITY_IMAGE_OVERRIDE
+    if not enabled:
+        IDENTITY_IMAGE_OVERRIDE = None
+        return
+    try:
+        jpeg = ASHLEY_IMAGE_PATH.read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"could not read Ashley image at {ASHLEY_IMAGE_PATH}: {error}") from error
+    if cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) is None:
+        raise RuntimeError(f"Ashley image is not decodable: {ASHLEY_IMAGE_PATH}")
+    IDENTITY_IMAGE_OVERRIDE = jpeg
 
 
 @api.middleware("http")
@@ -813,6 +912,25 @@ def identify_serialized(jpeg, frame_id, hfov):
         return identify(jpeg, frame_id, hfov)
 
 
+def log_identity_result(result, image_source):
+    """Expose face-parser output without dumping image bytes into the log."""
+    faces = [
+        {
+            "person": face.get("name") or "unknown",
+            "confidence": round(float(face.get("score") or 0.0), 3),
+            "bbox": face.get("bbox"),
+        }
+        for face in result.get("faces", [])
+    ]
+    log_pipeline_event(
+        "image_parsed",
+        image_source=image_source,
+        frame_id=result.get("frame_id"),
+        faces=faces,
+        timing_ms=result.get("ms", {}),
+    )
+
+
 def _remember_latest_frame(jpeg, frame_id, hfov):
     global _latest_frame, _latest_frame_sequence
     with _latest_frame_lock:
@@ -865,6 +983,10 @@ def resolve_latest_frame_research():
     if result is None:
         result = identify_serialized(frame["jpeg"], frame["frame_id"], frame["hfov"])
         _remember_identity_result(frame["token"], result)
+        log_identity_result(
+            result,
+            "fixed_ashley" if IDENTITY_IMAGE_OVERRIDE is not None else "latest_quest_frame",
+        )
 
     for face in result.get("faces", []):
         person_id = face.get("name")
@@ -893,17 +1015,22 @@ CONVERSATIONS.set_identity_resolver(resolve_latest_frame_research)
 @api.post("/id")
 async def post_id(request: Request, frame_id: int = -1, hfov: float = DEFAULT_HFOV):
     try:
-        jpeg = await request.body()
+        posted_jpeg = await request.body()
+        jpeg = IDENTITY_IMAGE_OVERRIDE if IDENTITY_IMAGE_OVERRIDE is not None else posted_jpeg
         token = _remember_latest_frame(jpeg, frame_id, hfov)
         result = await run_in_threadpool(identify_serialized, jpeg, frame_id, hfov)
         _remember_identity_result(token, result)
+        log_identity_result(
+            result,
+            "fixed_ashley" if IDENTITY_IMAGE_OVERRIDE is not None else "quest_upload",
+        )
         return result
     except Exception as e:
         return {"frame_id": frame_id, "faces": [], "error": str(e)}
 
 
 @api.post("/utterance")
-async def utterance(msg: dict):
+async def utterance(msg: dict, request: Request):
     """Ingest text (or raw WAV for legacy clients) into the conversation coordinator.
 
     `chunk_id` makes Pi retries idempotent. `force=true` additionally runs the
@@ -916,6 +1043,15 @@ async def utterance(msg: dict):
             text = await run_in_threadpool(brain.transcribe, audio)
         except Exception as e:
             return {"ok": False, "person_id": msg.get("person_id"), "text": "", "error": f"stt: {e}"}
+    if REQUEST_LOGGING_ENABLED:
+        source = request.client.host if request.client else "unknown"
+        chunk_id = msg.get("chunk_id") or msg.get("transcript_id")
+        timestamp = time.strftime("%H:%M:%S")
+        print(
+            f"[utterance {timestamp}] {source} chunk_id={chunk_id or '-'} "
+            f"text={json.dumps(text, ensure_ascii=False)}",
+            flush=True,
+        )
     conversation = CONVERSATIONS.ingest(text, msg.get("chunk_id") or msg.get("transcript_id"))
 
     # person_id remains for the legacy brain.py demo only. Conversation identity and
@@ -1070,7 +1206,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--log",
         action="store_true",
-        help="Log GET/POST request metadata without logging bodies.",
+        help="Log request metadata and the text of each utterance chunk.",
+    )
+    parser.add_argument(
+        "--log-no-picture",
+        action="store_true",
+        help=(
+            "Enable --log and use the fixed Ashley screenshot for /id instead of "
+            "the posted image."
+        ),
     )
     parser.add_argument(
         "--log-interval",
@@ -1082,15 +1226,21 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.log_interval < 0:
         parser.error("--log-interval must be zero or greater")
-    configure_request_logging(args.log, args.log_interval)
+    configure_request_logging(args.log or args.log_no_picture, args.log_interval)
+    try:
+        configure_identity_image_override(args.log_no_picture)
+    except RuntimeError as error:
+        parser.error(str(error))
 
     lan = socket.gethostbyname(socket.gethostname())
     print(f"{len(NAMES)} enrolled: {', '.join(NAMES) or 'nobody'}")
     print(f"Quest posts to  http://{lan}:8000/id?frame_id=N   (NOT localhost)")
     print(f"Broadcasting presence on UDP {DISCOVERY_PORT} for auto-discovery")
-    if args.log:
+    if args.log or args.log_no_picture:
         print(
             f"HTTP request logging enabled (duplicate interval: {args.log_interval:.3g}s)"
         )
+    if args.log_no_picture:
+        print(f"Fixed /id image enabled: {ASHLEY_IMAGE_PATH}")
     threading.Thread(target=_broadcast_presence, daemon=True).start()
     uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info", access_log=False)

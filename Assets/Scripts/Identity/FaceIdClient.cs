@@ -23,7 +23,7 @@ namespace HackTheNorth.Identity
     public class FaceIdClient : MonoBehaviour
     {
         [Tooltip("LAN address of the machine running server.py. NOT localhost: the Quest is a separate device.")]
-        [SerializeField] private string serverUrl = "http://192.168.1.100:8000";
+        [SerializeField] private string serverUrl = "http://192.168.137.167:8000";
         [SerializeField] private PassthroughCameraAccess cameraAccess;
         [SerializeField] private EnvironmentRaycastManager raycastManager;
         [SerializeField] private TrackedTargetRegistry registry;

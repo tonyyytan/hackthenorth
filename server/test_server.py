@@ -1,4 +1,6 @@
 """Server self-checks. Run from the repo root: python3 -m server.test_server"""
+import contextlib
+import io
 import json
 import threading
 import time
@@ -12,8 +14,10 @@ from .server import (
     _remember_latest_frame,
     _research_list,
     combine_research_context,
+    configure_request_logging,
     distance_m,
     iou,
+    log_identity_result,
     resolve_latest_frame_research,
 )
 
@@ -268,6 +272,58 @@ def test_request_log_limiter_is_per_source_method_and_path():
     assert limiter.record("pi", "POST", "/utterance", now=0.1) == 0
 
 
+def test_pipeline_logging_covers_trigger_identity_research_and_panels():
+    manager = ConversationManager(
+        lambda *args: {
+            "headline": "Ask about AR",
+            "talking_points": ["Discuss spatial interfaces"],
+            "suggested_question": "What are you building next?",
+        },
+        refresh_seconds=10,
+    )
+    output = io.StringIO()
+    configure_request_logging(True)
+    try:
+        with contextlib.redirect_stdout(output):
+            manager.ingest("start conversation", chunk_id="log:1")
+            session_id = manager.state()["session_id"]
+            accepted, error = manager.provide_research(
+                session_id,
+                "ashley-moon",
+                {"name": "Ashley Moon"},
+                "Verbose Ashley context",
+                ["Concise Ashley fact"],
+            )
+            assert accepted and error is None
+            wait_for(lambda: "panel2_update" in output.getvalue())
+            log_identity_result(
+                {
+                    "frame_id": 12,
+                    "faces": [{"name": "ashley-moon", "score": 0.536, "bbox": [1, 2, 3, 4]}],
+                    "ms": {"detect": 10, "total": 20},
+                },
+                "fixed_ashley",
+            )
+            manager.ingest("bye", chunk_id="log:2")
+        logged = output.getvalue()
+        for event in (
+            "trigger_detected",
+            "image_parsed",
+            "research_context",
+            "panel1_update",
+            "panel2_update",
+        ):
+            assert event in logged
+        assert '"person": "ashley-moon"' in logged
+        assert '"confidence": 0.536' in logged
+        assert "Concise Ashley fact" in logged
+        assert "Verbose Ashley context" in logged
+        assert "What are you building next?" in logged
+    finally:
+        configure_request_logging(False)
+        manager.close()
+
+
 if __name__ == "__main__":
     try:
         test_distance()
@@ -281,6 +337,7 @@ if __name__ == "__main__":
         test_combined_research_context_keeps_every_concise_item()
         test_latest_frame_resolver_uses_new_database_columns()
         test_request_log_limiter_is_per_source_method_and_path()
+        test_pipeline_logging_covers_trigger_identity_research_and_panels()
         print(f"ok (FACE_WIDTH_M={FACE_WIDTH_M})")
     finally:
         CONVERSATIONS.close()

@@ -1,0 +1,238 @@
+HACKTHENORTH SERVER SAMPLE TESTS
+================================
+
+Run every command from the repository root:
+
+  cd /Users/andrewdeng/Code/personal/projects/hackthenorth
+
+The screenshots below stay on the local Desktop. The test scripts read them but do
+not copy them into faces/, enroll them, or modify people.db.
+
+
+PICTURE MAP / EXPECTED RESULTS
+------------------------------
+
+Ashley Moon:
+  /Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png
+  Expected: ashley-moon, score around 0.536 (threshold 0.450)
+
+Ryan Qi:
+  /Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 6.01.20 AM.png
+  Expected: ryan-qi, score around 0.641 (threshold 0.450)
+
+Unknown person:
+  /Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 6.04.11 AM.png
+  Expected: UNKNOWN, score around 0.333 (below threshold 0.450)
+
+
+1. SERVER SELF-CHECK
+--------------------
+
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.test_server
+
+Expected final line:
+
+  ok (FACE_WIDTH_M=0.16)
+
+
+2. TEST ONE QUEST CAPTURE: ASHLEY
+---------------------------------
+
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_quest_capture \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png"
+
+Expected result:
+
+  detected as ashley-moon
+
+
+3. TEST ONE QUEST CAPTURE: RYAN
+-------------------------------
+
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_quest_capture \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 6.01.20 AM.png"
+
+Expected result:
+
+  detected as ryan-qi
+
+
+4. TEST ONE QUEST CAPTURE: UNKNOWN
+----------------------------------
+
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_quest_capture \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 6.04.11 AM.png"
+
+Expected result and exit code:
+
+  no enrolled person matched above the threshold
+  exit code 2 (intentional: the pipeline ran, but identity was unknown)
+
+
+5. PRINT THE COMPLETE /id JSON
+------------------------------
+
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_quest_capture \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png" \
+    --json
+
+Optional camera parameters:
+
+  --frame-id 1234 --hfov 80
+
+
+6. FULL CONVERSATION TEST: ASHLEY + TRANSCRIPTS + GEMINI + UNITY PANELS
+-----------------------------------------------------------------------
+
+This command configures "hi" as the start trigger only inside the test process.
+It streams these utterances through POST /utterance:
+
+  random text
+  what da hell
+  hi how are you
+  im good thanks, what about you
+  im doing not so great
+  today i tripped and fell and it hurt
+  oh i am so sorry
+
+Run:
+
+  GEMINI_MODEL=gemini-3.1-flash-lite \
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_conversation \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png"
+
+This test asserts all of the following:
+
+  - "random text" and "what da hell" do not enter conversation memory.
+  - "hi" starts a clean conversation session.
+  - The trigger word is removed; "how are you" is the first stored chunk.
+  - Transcript ingestion finishes before the gated identity result is released.
+  - The picture resolves to ashley-moon.
+  - Gemini receives concise research first, then verbose research.
+  - Gemini receives all five post-trigger transcript chunks in order.
+  - research_ready occurs before talking_points_ready.
+  - GET /conversation/panel1 returns Ashley's concise research.
+  - GET /conversation/panel2 returns Gemini's talking points.
+
+Expected final line:
+
+  all end-to-end assertions passed
+
+
+7. FULL CONVERSATION TEST WITH ANOTHER START TRIGGER
+----------------------------------------------------
+
+  GEMINI_MODEL=gemini-3.1-flash-lite \
+  MPLCONFIGDIR=/tmp/hackthenorth-mpl \
+    .venv/bin/python -m server.simulate_conversation \
+    "/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png" \
+    --trigger hello
+
+Note: the built-in sample utterances contain "hi", not "hello", so this command is
+expected to fail the trigger assertion. It is useful as a negative trigger test.
+
+
+8. START THE REAL SERVER WITH "hi" AND HTTP LOGGING
+---------------------------------------------------
+
+  CONVERSATION_START_PHRASES=hi \
+  GEMINI_MODEL=gemini-3.1-flash-lite \
+    .venv/bin/python -m server.server --log
+
+This process-local configuration overrides server/.env without editing it.
+Leave this terminal running for the curl tests below.
+
+
+9. LIVE SERVER HEALTH CHECK
+---------------------------
+
+In a second terminal:
+
+  curl -sS http://127.0.0.1:8000/health | python3 -m json.tool
+
+
+10. POST ASHLEY'S PICTURE TO THE LIVE /id ENDPOINT
+--------------------------------------------------
+
+  curl -sS -X POST \
+    "http://127.0.0.1:8000/id?frame_id=1001&hfov=80" \
+    -H "Content-Type: image/png" \
+    --data-binary \
+    "@/Users/andrewdeng/Desktop/Screenshot 2026-09-20 at 5.57.33 AM.png" \
+    | python3 -m json.tool
+
+
+11. STREAM SAMPLE UTTERANCES TO THE LIVE SERVER
+-----------------------------------------------
+
+Run these in order after posting Ashley's picture. The real server must have been
+started with CONVERSATION_START_PHRASES=hi as shown above.
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:1","text":"random text"}' | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:2","text":"what da hell"}' | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:3","text":"hi how are you"}' | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:4","text":"im good thanks, what about you"}' \
+    | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:5","text":"im doing not so great"}' \
+    | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:6","text":"today i tripped and fell and it hurt"}' \
+    | python3 -m json.tool
+
+  curl -sS -X POST http://127.0.0.1:8000/utterance \
+    -H "Content-Type: application/json" \
+    -d '{"chunk_id":"manual:7","text":"oh i am so sorry"}' \
+    | python3 -m json.tool
+
+
+12. READ THE TWO UNITY PANELS
+-----------------------------
+
+Panel one: concise research
+
+  curl -sS http://127.0.0.1:8000/conversation/panel1 \
+    | python3 -m json.tool
+
+Panel two: Gemini talking points
+
+  curl -sS http://127.0.0.1:8000/conversation/panel2 \
+    | python3 -m json.tool
+
+Conversation state and event ordering:
+
+  curl -sS http://127.0.0.1:8000/conversation/state \
+    | python3 -m json.tool
+
+  curl -sS "http://127.0.0.1:8000/conversation/events?after=0" \
+    | python3 -m json.tool
+
+
+13. STOP THE LIVE CONVERSATION
+------------------------------
+
+  curl -sS -X POST http://127.0.0.1:8000/conversation/stop \
+    | python3 -m json.tool
+
+After stopping, both panel endpoints should return empty text and no active session.
