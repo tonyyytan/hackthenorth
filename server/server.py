@@ -58,6 +58,7 @@ import numpy as np
 
 import brain
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 
 warnings.filterwarnings("ignore")
@@ -761,6 +762,7 @@ def identify(jpeg, frame_id, hfov):
         i = t["idx"]
         emb = app_fa.models["recognition"].get(img, _Face(bboxes[i], kpss[i]))
         t["name"], t["score"] = match(emb / np.linalg.norm(emb))
+        print(f"DEBUG match: name={t['name']} score={t['score']} threshold={THRESHOLD}", flush=True)
         t["last_embedded"] = now
         n_embedded += 1
 
@@ -1028,6 +1030,17 @@ async def latest_insight():
     pid, insight = brain.latest()
     return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None,
             "researching": brain.is_researching(pid) if pid else False}
+
+
+@api.get("/debug/latest_frame")
+async def debug_latest_frame():
+    """Raw JPEG of the most recent frame the Quest posted to /id -- open this URL directly
+    in a browser to see exactly what the camera captured (framing, focus, distance)."""
+    with _latest_frame_lock:
+        if _latest_frame is None:
+            raise HTTPException(404, "no frame received yet")
+        jpeg = _latest_frame["jpeg"]
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
 @api.get("/health")

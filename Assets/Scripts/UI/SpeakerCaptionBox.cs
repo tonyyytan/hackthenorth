@@ -191,6 +191,10 @@ namespace HackTheNorth.UI
             FadeTo(0f);
         }
 
+        /// <summary>Alias for Hide() -- ConversationPanelClient treats "empty text" as
+        /// authoritative and calls this to dismiss a panel, same effect as Hide().</summary>
+        public void Clear() => Hide();
+
         /// <summary>0 = show text instantly, no typewriter effect. Useful for test/debug
         /// tools where rapid re-triggering would otherwise fight the reveal animation.</summary>
         public void SetTypewriterSpeed(float charsPerSec) => typewriterCharsPerSec = charsPerSec;
