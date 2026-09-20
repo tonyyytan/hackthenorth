@@ -1,3 +1,7 @@
+# Node (server/)
+server/node_modules/
+server/.env
+
 # Unity .gitignore Template
 # Source: https://github.com/github/gitignore/blob/main/Unity.gitignore
 # Last synced: 2026-07-02
@@ -116,3 +120,27 @@ InitTestScene*.unity*
 # Local meta-xr-operator MCP tooling's own injected OpenXR API layer — dev-machine-only,
 # not part of the app.
 /[Aa]ssets/XR/APILayers~/
+
+# Python
+__pycache__/
+dml_test/
+
+# Local agent notes
+CLAUDE.md
+
+# Real people's faces never get committed; only the test images below do
+faces/*
+!faces/testuser/
+!faces/thor.jpg
+!faces/loki.jpg
+
+# Roster + research is built locally: python seed_profiles.py, then node server/research.js
+people.db
+judges.txt
+
+# Meta's sample project, reference only (CLAUDE.md) — never part of the build
+Unity-PassthroughCameraApiSamples/
+
+# Playwright's logged-in LinkedIn session is an account credential; counters are local state
+linkedin/user_data/
+linkedin/state.json
