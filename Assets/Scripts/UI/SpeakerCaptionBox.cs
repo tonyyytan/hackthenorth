@@ -43,9 +43,12 @@ namespace HackTheNorth.UI
         [SerializeField] private float autoHideDelay = 4f;
         [Tooltip("Characters/sec for the message reveal. 0 = show instantly, no typewriter effect.")]
         [SerializeField] private float typewriterCharsPerSec = 45f;
+        [Tooltip("Scale the panel starts from when appearing, and shrinks back to when dismissed (a Cluely-style pop, not a plain fade).")]
+        [SerializeField] private float revealScaleFactor = 0.85f;
 
         private CanvasGroup canvasGroup;
         private Vector3 velocity;
+        private Vector3 baseScale;
         private Coroutine fadeRoutine;
         private Coroutine autoHideRoutine;
         private Coroutine typeRoutine;
@@ -55,6 +58,8 @@ namespace HackTheNorth.UI
         {
             canvasGroup = GetComponent<CanvasGroup>();
             canvasGroup.alpha = 0f;
+            baseScale = transform.localScale; // whatever WorldScale the factory set -- animate relative to this, never touch it
+            transform.localScale = baseScale * revealScaleFactor;
 
             if (followTarget == null && Camera.main != null)
             {
@@ -179,6 +184,19 @@ namespace HackTheNorth.UI
             followTarget = target;
         }
 
+        /// <summary>
+        /// Rescales the panel's target size (e.g. DebugInsightOverlay's smaller debug widget)
+        /// by multiplying the base scale the reveal animation animates to/from. Never set
+        /// transform.localScale directly from outside — Awake() and the fade coroutine both
+        /// own it for the reveal-pop animation, and a direct write gets silently overwritten
+        /// or fought over the next fade.
+        /// </summary>
+        public void SetBaseScale(float multiplier)
+        {
+            baseScale *= multiplier;
+            transform.localScale = canvasGroup.alpha > 0.01f ? baseScale : baseScale * revealScaleFactor;
+        }
+
         /// <summary>Configure this box to anchor to a world-space point (e.g. a TrackedTarget) instead of the wearer's head.</summary>
         public void ConfigureWorldAnchor(Transform target, Vector3? worldOffset = null, Transform faceCam = null)
         {
@@ -216,17 +234,29 @@ namespace HackTheNorth.UI
             fadeRoutine = StartCoroutine(FadeRoutine(targetAlpha));
         }
 
+        // Appearing pops in from slightly smaller with an ease-out (fast start, settles gently);
+        // dismissing shrinks back down with an ease-in (starts slow, accelerates away) — a
+        // materialize/dematerialize feel rather than a plain opacity crossfade.
         private IEnumerator FadeRoutine(float targetAlpha)
         {
+            bool showing = targetAlpha > 0.5f;
             float startAlpha = canvasGroup.alpha;
+            Vector3 startScale = transform.localScale;
+            Vector3 endScale = showing ? baseScale : baseScale * revealScaleFactor;
             float t = 0f;
             while (t < fadeDuration)
             {
                 t += Time.deltaTime;
-                canvasGroup.alpha = Mathf.Lerp(startAlpha, targetAlpha, t / fadeDuration);
+                float linear = Mathf.Clamp01(t / fadeDuration);
+                float eased = showing
+                    ? 1f - (1f - linear) * (1f - linear)       // ease-out
+                    : linear * linear;                          // ease-in
+                canvasGroup.alpha = Mathf.Lerp(startAlpha, targetAlpha, linear);
+                transform.localScale = Vector3.LerpUnclamped(startScale, endScale, eased);
                 yield return null;
             }
             canvasGroup.alpha = targetAlpha;
+            transform.localScale = endScale;
         }
     }
 }

@@ -224,6 +224,13 @@ def get(pid):
     return _cache.get(pid)
 
 
+def is_researching(pid):
+    """True while an insight call for pid is in flight -- lets the headset show a
+    'Researching...' state instead of silently reusing the last cached answer."""
+    with _lock:
+        return pid in _inflight
+
+
 def latest():
     """(person_id, insight) most recently generated, for the no-camera debug overlay --
     lets the Quest show real generated content without a working face match."""

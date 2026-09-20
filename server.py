@@ -233,7 +233,8 @@ def identify(jpeg, frame_id, hfov):
                    "score": t["score"], "bbox": t["bbox"],
                    "distance_m": distance_m(t["bbox"][2] - t["bbox"][0], img.shape[1], hfov),
                    "profile": PROFILES.get(t["name"] or t["badge"]),
-                   "insight": brain.get(t["name"] or t["badge"])} for t in fresh],
+                   "insight": brain.get(t["name"] or t["badge"]),
+                   "researching": brain.is_researching(t["name"] or t["badge"])} for t in fresh],
         "ms": {"detect": round((t_det - t0) * 1000), "total": round((t_end - t0) * 1000)},
         "embedded": n_embedded,
     }

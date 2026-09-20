@@ -14,11 +14,13 @@ namespace HackTheNorth.Identity
 {
     /// <summary>
     /// Streams passthrough camera frames to the Python identity service (server.py, POST /id)
-    /// and anchors one caption box per recognized person: face bbox -> passthrough-camera ray
-    /// -> depth raycast -> TrackedTarget keyed by person id -> TrackedCaptionSpawner box.
-    /// Up to maxInFlight requests at once, so the result rate tracks server time, not server +
-    /// network + encode. Boxes are world-anchored with each frame's own camera pose, so head
-    /// motion never lags; only the person's own movement waits on the next result.
+    /// and anchors TWO caption boxes per recognized person (see TrackedCaptionSpawner): a
+    /// profile box (static bullet-point facts) and an insight box (live conversational
+    /// suggestions). Pipeline: face bbox -> passthrough-camera ray -> depth raycast ->
+    /// TrackedTarget keyed by person id -> spawner boxes. Up to maxInFlight requests at once,
+    /// so the result rate tracks server time, not server + network + encode. Boxes are
+    /// world-anchored with each frame's own camera pose, so head motion never lags; only the
+    /// person's own movement waits on the next result.
     /// </summary>
     public class FaceIdClient : MonoBehaviour
     {
@@ -46,6 +48,7 @@ namespace HackTheNorth.Identity
         private int statCount;
         private float statSeconds, statSince;
         private readonly HashSet<string> shown = new();
+        private readonly HashSet<string> insightRevealedOnce = new();
 
         private IEnumerator Start()
         {
@@ -132,6 +135,7 @@ namespace HackTheNorth.Identity
             {
                 spawner.RemoveCaptionBox(id);
                 shown.Remove(id);
+                insightRevealedOnce.Remove(id); // re-appearing later should feel like a fresh "Continue conversation!" moment again
             }
         }
 
@@ -154,22 +158,67 @@ namespace HackTheNorth.Identity
                     : ray.GetPoint(f.distance_m > 0 ? f.distance_m : fallbackDistance);
 
                 registry.Update(f.name, point);
-                var box = spawner.GetOrCreateCaptionBox(f.name);
-                if (box == null) continue;
-                box.ShowDialogue(string.IsNullOrEmpty(f.profile?.name) ? f.name : f.profile.name, Body(f));
+                string displayName = string.IsNullOrEmpty(f.profile?.name) ? f.name : f.profile.name;
+
+                // Two separate panels (Cluely-style split) instead of one box carrying
+                // everything: profile facts change rarely, insight updates continuously as
+                // the conversation goes -- mixing them in one box meant the whole thing
+                // re-triggered the typewriter reveal every time either half changed.
+                string profileBody = ProfileBullets(f);
+                if (!string.IsNullOrEmpty(profileBody))
+                {
+                    var profileBox = spawner.GetOrCreateProfileBox(f.name);
+                    profileBox?.ShowDialogue(displayName, profileBody);
+                }
+
+                // Always show the insight box (Cluely's own "Listening..." bubble is always
+                // present too) with one of four states, rather than only appearing once real
+                // content exists -- the wearer should always know whether the assistant is
+                // idle, actively working, or just produced something new.
+                var insightBox = spawner.GetOrCreateInsightBox(f.name);
+                if (insightBox != null)
+                {
+                    string insightBody = InsightBody(f);
+                    if (f.researching)
+                    {
+                        insightBox.ShowDialogue("Researching", "...");
+                    }
+                    else if (!string.IsNullOrEmpty(insightBody))
+                    {
+                        // First time content ever lands for this person: a brief, more
+                        // attention-grabbing header, then settle into the steady-state label.
+                        bool firstReveal = insightRevealedOnce.Add(f.name);
+                        insightBox.ShowDialogue(firstReveal ? "Continue conversation!" : "Worth asking", insightBody);
+                    }
+                    else
+                    {
+                        insightBox.ShowDialogue("Listening", "Say something to get started");
+                    }
+                }
+
                 shown.Add(f.name);
             }
         }
 
-        // The web-research opener fills the box from the first frame; once the conversation
-        // insight exists it takes over, since it knows what you're actually talking about.
-        // ponytail: research summary stays off the box (~50 words is too long to read in AR);
-        // it still reaches the insight via the profile brain.py is given.
-        private static string Body(Face f) => string.Join("\n", new[]
+        // Static-ish facts about the person, as bullet points -- role/what they're working on/
+        // what they're looking for. Falls back to the opener line if nothing else is known yet.
+        private static string ProfileBullets(Face f)
         {
-            f.profile?.role,
+            var lines = new[] { f.profile?.role, f.profile?.working_on, f.profile?.looking_for }
+                .Where(s => !string.IsNullOrEmpty(s))
+                .Select(s => $"• {s}")
+                .ToList();
+            if (lines.Count == 0 && !string.IsNullOrEmpty(f.profile?.opener)) lines.Add(f.profile.opener);
+            return string.Join("\n", lines);
+        }
+
+        // Live conversational suggestions from brain.py -- what they're talking about right
+        // now, and a specific question worth asking next. Only meaningful once the
+        // conversation has actually produced something (see brain.py's batching gate).
+        private static string InsightBody(Face f) => string.Join("\n", new[]
+        {
             f.insight?.topic,
-            string.IsNullOrEmpty(f.insight?.suggested_question) ? f.profile?.opener : f.insight.suggested_question,
+            f.insight?.suggested_question,
         }.Where(s => !string.IsNullOrEmpty(s)));
 
         // Measured from the camera's own rays, so it stays right whatever resolution is picked.
@@ -186,6 +235,7 @@ namespace HackTheNorth.Identity
             public int[] bbox; // x1, y1, x2, y2 in JPEG pixels
             public Profile profile;
             public Insight insight;
+            public bool researching;
         }
         [Serializable] private class Profile { public string name, role, bio, links, working_on, looking_for, research, opener; }
         [Serializable] private class Insight { public string topic, shared_interest, suggested_question; }

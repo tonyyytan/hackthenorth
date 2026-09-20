@@ -37,7 +37,7 @@ namespace HackTheNorth.Identity
         private void Start()
         {
             box = SpeakerCaptionBoxFactory.Create(null);
-            box.transform.localScale *= 0.6f; // smaller footprint so its edges don't clip the FOV
+            box.SetBaseScale(0.6f); // smaller footprint so its edges don't clip the FOV
             // Lower-center-ish: clear of StatusOverlay's top-left LIVE indicator, close enough
             // to center that the whole panel (not just its middle) stays comfortably in view.
             box.ConfigureHudLocked(new Vector3(-0.14f, -0.09f, 1.3f));
