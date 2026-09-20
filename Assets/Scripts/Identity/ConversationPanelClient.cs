@@ -21,7 +21,16 @@ namespace HackTheNorth.Identity
         private string lastResearchTitle = string.Empty;
         private string lastTalkingPointsText = string.Empty;
 
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+        // Auto-spawn disabled for now: this expects /conversation/panel1|2 to return Andrew's
+        // ConversationManager shape ({text, display_name, bullets, ...}), but that route was
+        // reconciled during the main merge to keep FaceIdClient.cs's simpler FOCUS-based shape
+        // ({person_id, profile} / {person_id, insight, researching}), which the Quest's
+        // world-anchored per-person panels (TrackedCaptionSpawner) already depend on. Running
+        // both at once means duplicate 0.5s pollers hitting the same endpoints and this script's
+        // own separate HUD-locked panels always coming back empty. Needs a decision with
+        // whoever owns the ConversationManager side about which panel shape is canonical before
+        // re-enabling this.
+        // [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Spawn()
         {
             if (FindAnyObjectByType<ConversationPanelClient>() != null) return;

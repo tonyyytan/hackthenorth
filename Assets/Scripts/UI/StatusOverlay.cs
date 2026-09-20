@@ -1,3 +1,5 @@
+using System.Collections;
+using HackTheNorth.Tracking;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -26,7 +28,15 @@ namespace HackTheNorth.UI
 
     public class StatusOverlay : MonoBehaviour
     {
+        private static readonly Color IdleColor = new Color(0.35f, 1f, 0.45f, 0.85f); // dim green -- app running, nobody tracked yet
+        private static readonly Color ActiveColor = new Color(0.392f, 0.710f, 1f, 0.95f); // accent blue -- a session is live (matches SpeakerCaptionBoxFactory.AccentColor)
+
         private Transform cam;
+        private TextMeshProUGUI text;
+        private Transform label;
+        private TrackedTargetRegistry registry;
+        private bool sessionActive;
+        private Coroutine popRoutine;
 
         private void Start()
         {
@@ -52,14 +62,15 @@ namespace HackTheNorth.UI
             textRect.offsetMin = Vector2.zero;
             textRect.offsetMax = Vector2.zero;
 
-            var text = textGo.AddComponent<TextMeshProUGUI>();
+            text = textGo.AddComponent<TextMeshProUGUI>();
             text.text = "● LIVE";
             text.fontSize = 26f;
             text.fontStyle = FontStyles.Bold;
-            text.color = new Color(0.35f, 1f, 0.45f, 0.85f); // dim green -- visible but not distracting
+            text.color = IdleColor;
             text.alignment = TextAlignmentOptions.MidlineLeft;
             text.outlineWidth = 0.15f;
             text.outlineColor = new Color(0.05f, 0.05f, 0.05f, 0.8f);
+            label = textGo.transform;
 
             TryAttachToCamera(canvasGo.transform);
         }
@@ -70,6 +81,35 @@ namespace HackTheNorth.UI
             // guaranteed relative to DontDestroyOnLoad objects) -- keep retrying until it's
             // actually parented, then stop.
             if (cam == null) TryAttachToCamera(transform.GetChild(0));
+
+            if (registry == null) registry = FindAnyObjectByType<TrackedTargetRegistry>();
+            bool active = registry != null && registry.Targets.Count > 0;
+            if (active != sessionActive)
+            {
+                sessionActive = active;
+                text.text = active ? "● TRACKING" : "● LIVE";
+                text.color = active ? ActiveColor : IdleColor;
+                if (popRoutine != null) StopCoroutine(popRoutine);
+                popRoutine = StartCoroutine(PopBurst());
+            }
+        }
+
+        // A brief scale burst right at the moment a session starts/stops -- makes the state
+        // change actually noticeable instead of a text swap you might not catch mid-glance.
+        private IEnumerator PopBurst()
+        {
+            const float duration = 0.25f;
+            Vector3 baseScale = label.localScale;
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.deltaTime;
+                float p = t / duration;
+                float bump = 1f + 0.35f * Mathf.Sin(p * Mathf.PI); // up and back down
+                label.localScale = baseScale * bump;
+                yield return null;
+            }
+            label.localScale = baseScale;
         }
 
         private void TryAttachToCamera(Transform canvasTransform)

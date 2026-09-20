@@ -58,6 +58,7 @@ import numpy as np
 
 import brain
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
 from fastapi.concurrency import run_in_threadpool
 
 warnings.filterwarnings("ignore")
@@ -875,6 +876,7 @@ def identify(jpeg, frame_id, hfov):
         i = t["idx"]
         emb = app_fa.models["recognition"].get(img, _Face(bboxes[i], kpss[i]))
         t["name"], t["score"] = match(emb / np.linalg.norm(emb))
+        print(f"DEBUG match: name={t['name']} score={t['score']} threshold={THRESHOLD}", flush=True)
         t["last_embedded"] = now
         n_embedded += 1
 
@@ -892,7 +894,8 @@ def identify(jpeg, frame_id, hfov):
                    "score": t["score"], "bbox": t["bbox"],
                    "distance_m": distance_m(t["bbox"][2] - t["bbox"][0], img.shape[1], hfov),
                    "profile": PROFILES.get(t["name"]),
-                   "insight": brain.get(t["name"])} for t in fresh],
+                   "insight": brain.get(t["name"]),
+                   "researching": brain.is_researching(t["name"]) if t["name"] else False} for t in fresh],
         "ms": {"detect": round((t_det - t0) * 1000), "total": round((t_end - t0) * 1000)},
         "embedded": n_embedded,
     }
@@ -1130,18 +1133,6 @@ async def conversation_state():
     return CONVERSATIONS.state()
 
 
-@api.get("/conversation/panel1")
-async def conversation_panel_one():
-    """Polled by the Quest for concise cached research about the matched person."""
-    return CONVERSATIONS.panel_one()
-
-
-@api.get("/conversation/panel2")
-async def conversation_panel_two():
-    """Polled by the Quest for Gemini-generated live talking points."""
-    return CONVERSATIONS.panel_two()
-
-
 @api.on_event("shutdown")
 async def shutdown_conversation_workers():
     CONVERSATIONS.close()
@@ -1161,13 +1152,46 @@ async def reload():
     return {"enrolled": NAMES, "profiles": sorted(PROFILES)}
 
 
+# STABLE CONTRACT -- do not rename/remove these two, whatever else changes in this file.
+# The Quest polls both every ~0.5s. Together with POST /id (frame capture, above), this is
+# the complete, locked interface the headset depends on:
+#   POST /id                    -- camera frame in, recognized faces out
+#   GET  /conversation/panel1   -- top panel: bullet-point facts about the person in view
+#   GET  /conversation/panel2   -- bottom panel: live conversational suggestion/tip
+@api.get("/conversation/panel1")
+async def conversation_panel1():
+    """Top panel: bullet-point facts about whoever the Quest currently has in view (FOCUS)."""
+    pid = FOCUS
+    return {"person_id": pid, "profile": PROFILES.get(pid) if pid else None}
+
+
+@api.get("/conversation/panel2")
+async def conversation_panel2():
+    """Bottom panel: live conversational suggestion for whoever the Quest currently has in view."""
+    pid = FOCUS
+    return {"person_id": pid, "insight": brain.get(pid) if pid else None,
+            "researching": brain.is_researching(pid) if pid else False}
+
+
 @api.get("/debug/latest_insight")
 async def latest_insight():
     """Whatever talk.py (or the Pi) most recently generated, for anyone -- lets
     DebugInsightOverlay.cs show real LLM output in-headset with no working face
     match at all (no printed photo, PassthroughCameraAccess not working over Link, etc)."""
     pid, insight = brain.latest()
-    return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None}
+    return {"person_id": pid, "insight": insight, "profile": PROFILES.get(pid) if pid else None,
+            "researching": brain.is_researching(pid) if pid else False}
+
+
+@api.get("/debug/latest_frame")
+async def debug_latest_frame():
+    """Raw JPEG of the most recent frame the Quest posted to /id -- open this URL directly
+    in a browser to see exactly what the camera captured (framing, focus, distance)."""
+    with _latest_frame_lock:
+        if _latest_frame is None:
+            raise HTTPException(404, "no frame received yet")
+        jpeg = _latest_frame["jpeg"]
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
 @api.get("/health")

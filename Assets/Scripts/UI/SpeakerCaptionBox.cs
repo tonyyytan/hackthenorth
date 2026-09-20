@@ -43,9 +43,13 @@ namespace HackTheNorth.UI
         [SerializeField] private float autoHideDelay = 4f;
         [Tooltip("Characters/sec for the message reveal. 0 = show instantly, no typewriter effect.")]
         [SerializeField] private float typewriterCharsPerSec = 45f;
+        [Tooltip("Scale the panel starts from when appearing, and shrinks back to when dismissed (a Cluely-style pop, not a plain fade).")]
+        [SerializeField] private float revealScaleFactor = 0.85f;
 
         private CanvasGroup canvasGroup;
         private Vector3 velocity;
+        private Vector3 baseScale;
+        private string revealTarget; // the full message we're showing/typing toward -- NOT messageLabel.text, which is only partial mid-typewriter
         private Coroutine fadeRoutine;
         private Coroutine autoHideRoutine;
         private Coroutine typeRoutine;
@@ -55,6 +59,8 @@ namespace HackTheNorth.UI
         {
             canvasGroup = GetComponent<CanvasGroup>();
             canvasGroup.alpha = 0f;
+            baseScale = transform.localScale; // whatever WorldScale the factory set -- animate relative to this, never touch it
+            transform.localScale = baseScale * revealScaleFactor;
 
             if (followTarget == null && Camera.main != null)
             {
@@ -109,25 +115,28 @@ namespace HackTheNorth.UI
             if (speakerNameLabel != null) speakerNameLabel.text = speakerName;
             RevealMessage(message);
 
-            FadeTo(1f);
+            // Only play the pop-in animation when actually transitioning from hidden to
+            // shown. Callers like FaceIdClient/DesktopPipelinePreview call ShowDialogue on
+            // every poll (many times/sec on-device) even when nothing changed -- without this
+            // guard the box would replay its entrance animation continuously instead of
+            // settling, which is exactly the "playing over and over" bug this fixes.
+            if (canvasGroup.alpha < 0.99f) FadeTo(1f);
 
-            if (autoHideDelay > 0f)
-            {
-                if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
-                autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
-            }
+            RestartAutoHideTimer();
         }
 
         /// <summary>Update just the message text of an already-visible box (e.g. streaming transcript).</summary>
         public void UpdateMessage(string message)
         {
             RevealMessage(message);
+            RestartAutoHideTimer();
+        }
 
-            if (autoHideDelay > 0f)
-            {
-                if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
-                autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
-            }
+        private void RestartAutoHideTimer()
+        {
+            if (autoHideDelay <= 0f) return;
+            if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
+            autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
         }
 
         /// <summary>
@@ -141,8 +150,16 @@ namespace HackTheNorth.UI
             if (messageLabel == null) return;
             message ??= string.Empty;
 
+            // Compare against the TARGET we were last asked to show, not messageLabel.text --
+            // that's only partially typed while a reveal is in progress, so comparing against
+            // it made every repeated call (e.g. a poll loop calling ShowDialogue every 0.5s
+            // with unchanged content) look like "new" text and restart the typewriter from
+            // scratch forever, never letting it finish.
+            if (message == revealTarget) return;
+            revealTarget = message;
+
             if (typeRoutine != null) StopCoroutine(typeRoutine);
-            if (typewriterCharsPerSec <= 0f || message == messageLabel.text)
+            if (typewriterCharsPerSec <= 0f)
             {
                 messageLabel.text = message;
                 return;
@@ -174,9 +191,30 @@ namespace HackTheNorth.UI
             FadeTo(0f);
         }
 
+        /// <summary>Alias for Hide() -- ConversationPanelClient treats "empty text" as
+        /// authoritative and calls this to dismiss a panel, same effect as Hide().</summary>
+        public void Clear() => Hide();
+
+        /// <summary>0 = show text instantly, no typewriter effect. Useful for test/debug
+        /// tools where rapid re-triggering would otherwise fight the reveal animation.</summary>
+        public void SetTypewriterSpeed(float charsPerSec) => typewriterCharsPerSec = charsPerSec;
+
         public void SetFollowTarget(Transform target)
         {
             followTarget = target;
+        }
+
+        /// <summary>
+        /// Rescales the panel's target size (e.g. DebugInsightOverlay's smaller debug widget)
+        /// by multiplying the base scale the reveal animation animates to/from. Never set
+        /// transform.localScale directly from outside — Awake() and the fade coroutine both
+        /// own it for the reveal-pop animation, and a direct write gets silently overwritten
+        /// or fought over the next fade.
+        /// </summary>
+        public void SetBaseScale(float multiplier)
+        {
+            baseScale *= multiplier;
+            transform.localScale = canvasGroup.alpha > 0.01f ? baseScale : baseScale * revealScaleFactor;
         }
 
         /// <summary>Configure this box to anchor to a world-space point (e.g. a TrackedTarget) instead of the wearer's head.</summary>
@@ -216,17 +254,29 @@ namespace HackTheNorth.UI
             fadeRoutine = StartCoroutine(FadeRoutine(targetAlpha));
         }
 
+        // Appearing pops in from slightly smaller with an ease-out (fast start, settles gently);
+        // dismissing shrinks back down with an ease-in (starts slow, accelerates away) — a
+        // materialize/dematerialize feel rather than a plain opacity crossfade.
         private IEnumerator FadeRoutine(float targetAlpha)
         {
+            bool showing = targetAlpha > 0.5f;
             float startAlpha = canvasGroup.alpha;
+            Vector3 startScale = transform.localScale;
+            Vector3 endScale = showing ? baseScale : baseScale * revealScaleFactor;
             float t = 0f;
             while (t < fadeDuration)
             {
                 t += Time.deltaTime;
-                canvasGroup.alpha = Mathf.Lerp(startAlpha, targetAlpha, t / fadeDuration);
+                float linear = Mathf.Clamp01(t / fadeDuration);
+                float eased = showing
+                    ? 1f - (1f - linear) * (1f - linear)       // ease-out
+                    : linear * linear;                          // ease-in
+                canvasGroup.alpha = Mathf.Lerp(startAlpha, targetAlpha, linear);
+                transform.localScale = Vector3.LerpUnclamped(startScale, endScale, eased);
                 yield return null;
             }
             canvasGroup.alpha = targetAlpha;
+            transform.localScale = endScale;
         }
     }
 }
