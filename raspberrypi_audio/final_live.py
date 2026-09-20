@@ -37,15 +37,11 @@ if not ASSEMBLYAI_API_KEY:
 
 
 # ============================================================
-# SERVER CONFIGURATION
+# SERVER SETTINGS
 # ============================================================
 
-# pi_client.py automatically discovers server.py over the LAN.
-# You can optionally set:
-#
-# SERVER_URL=http://192.168.x.x:8000
-#
-# in .env to skip UDP discovery.
+# pi_client.py automatically discovers server.py
+# over the LAN using UDP broadcast.
 
 SERVER_DISCOVERY_TIMEOUT = 15.0
 
@@ -57,7 +53,7 @@ SERVER_DISCOVERY_TIMEOUT = 15.0
 SAMPLE_RATE = 48000
 CHANNELS = 1
 
-# AssemblyAI accepts 50–1000 ms chunks.
+# AssemblyAI accepts 50-1000 ms audio chunks.
 CHUNK_MS = 50
 
 BLOCKSIZE = (
@@ -73,10 +69,7 @@ MAX_AUDIO_QUEUE = 20
 
 SPEECH_MODEL = "universal-streaming-english"
 
-# Expect two microphones / speakers.
-MAX_SPEAKERS = 2
-
-# End-of-turn detection.
+# Turn detection
 END_OF_TURN_CONFIDENCE = 0.4
 MIN_SILENCE_WHEN_CONFIDENT_MS = 160
 MAX_TURN_SILENCE_MS = 800
@@ -92,102 +85,6 @@ audio_queue: "queue.Queue[bytes]" = queue.Queue(
 
 
 # ============================================================
-# OUTPUT LOCK
-# ============================================================
-
-print_lock = threading.Lock()
-
-
-def log(*args, **kwargs):
-    with print_lock:
-        print(*args, **kwargs, flush=True)
-
-
-# ============================================================
-# SPEAKER MAPPING
-# ============================================================
-
-def speaker_name(label: Optional[str]) -> str:
-    """
-    Convert AssemblyAI speaker labels to friendly names.
-
-    A -> Speaker 1
-    B -> Speaker 2
-    """
-
-    if label is None:
-        return "Speaker ?"
-
-    label = str(label).upper()
-
-    if label == "A":
-        return "Speaker 1"
-
-    if label == "B":
-        return "Speaker 2"
-
-    return f"Speaker {label}"
-
-
-def speaker_id(label: Optional[str]) -> Optional[str]:
-    """
-    Convert AssemblyAI speaker labels into stable IDs
-    sent to server.py.
-    """
-
-    if label is None:
-        return None
-
-    label = str(label).upper()
-
-    if label == "A":
-        return "SPEAKER_1"
-
-    if label == "B":
-        return "SPEAKER_2"
-
-    return f"SPEAKER_{label}"
-
-
-# ============================================================
-# SEND TRANSCRIPT TO SERVER
-# ============================================================
-
-def send_transcript(
-    server_url: str,
-    transcript: str,
-    label: Optional[str],
-):
-    """
-    Send one completed transcript turn to server.py
-    using the existing pi_client.py module.
-    """
-
-    speaker = speaker_name(label)
-    person = speaker_id(label)
-
-    message = f"[{speaker}] {transcript}"
-
-    try:
-        result = pi_client.send_text(
-            server_url,
-            text=message,
-            person_id=person,
-        )
-
-        log(
-            f"📡 Sent {speaker} to server: "
-            f"{result}"
-        )
-
-    except Exception as e:
-        log(
-            f"❌ Failed to send {speaker} "
-            f"to server: {e}"
-        )
-
-
-# ============================================================
 # AUDIO CALLBACK
 # ============================================================
 
@@ -198,11 +95,17 @@ def audio_callback(
     status,
 ):
     """
-    Keep the PortAudio callback lightweight.
+    Keep the PortAudio callback extremely lightweight.
+
+    The callback only copies the microphone audio
+    into the queue. Network operations happen elsewhere.
     """
 
     if status:
-        log(f"\n⚠️ Audio: {status}")
+        print(
+            f"\n⚠️ Audio: {status}",
+            flush=True,
+        )
 
     chunk = indata.tobytes()
 
@@ -210,8 +113,7 @@ def audio_callback(
         audio_queue.put_nowait(chunk)
 
     except queue.Full:
-
-        # Drop the oldest audio to remain near real time.
+        # Drop the oldest chunk to stay near real time.
         try:
             audio_queue.get_nowait()
         except queue.Empty:
@@ -232,6 +134,9 @@ def audio_chunks(
 ):
     """
     Generator consumed by AssemblyAI.
+
+    It continuously provides microphone audio
+    as it becomes available.
     """
 
     while not stop_event.is_set():
@@ -246,50 +151,99 @@ def audio_chunks(
 
 
 # ============================================================
+# SEND TRANSCRIPT TO SERVER
+# ============================================================
+
+def send_transcript(
+    server_url: str,
+    transcript: str,
+):
+    """
+    Send ONLY the transcript text to server.py.
+
+    No speaker ID.
+    No person ID.
+    No Gemini result.
+    """
+
+    try:
+        result = pi_client.send_text(
+            server_url,
+            text=transcript,
+        )
+
+        print(
+            f"📡 Sent to server: {result}",
+            flush=True,
+        )
+
+    except Exception as e:
+        print(
+            f"❌ Failed to send transcript: {e}",
+            flush=True,
+        )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
 
-    log(
-        "🎤 Starting "
-        "Raspberry Pi → AssemblyAI → Server pipeline..."
+    print(
+        "🎤 Starting Raspberry Pi → AssemblyAI → Server",
+        flush=True,
     )
+
+    print(
+        "Only transcript text will be sent.",
+        flush=True,
+    )
+
 
     # ========================================================
     # DISCOVER SERVER
     # ========================================================
 
     try:
+
         server_url = pi_client.discover(
             timeout=SERVER_DISCOVERY_TIMEOUT
         )
 
     except TimeoutError as e:
-        log(f"❌ {e}")
+
+        print(
+            f"❌ {e}",
+            flush=True,
+        )
+
         sys.exit(1)
 
-    log(
-        f"📡 Server discovered at: "
-        f"{server_url}"
+    print(
+        f"📡 Server found at: {server_url}",
+        flush=True,
     )
 
+
     # ========================================================
-    # THREADS
+    # STOP EVENT
     # ========================================================
 
     stop_event = threading.Event()
 
-    # Sending HTTP requests can take some time.
-    # Keep them outside the AssemblyAI callback thread.
+
+    # ========================================================
+    # SERVER THREAD POOL
+    # ========================================================
+
+    # Sending an HTTP request can take some time.
+    # We don't want that to block AssemblyAI's streaming.
     server_executor = ThreadPoolExecutor(
         max_workers=4,
         thread_name_prefix="server",
     )
 
-    # Prevent printing/sending the same completed
-    # turn twice.
-    seen_turns = set()
 
     # ========================================================
     # ASSEMBLYAI CLIENT
@@ -301,23 +255,27 @@ def main():
         )
     )
 
+
     # ========================================================
-    # ASSEMBLYAI CALLBACKS
+    # CALLBACKS
     # ========================================================
 
     def on_begin(
         client,
         event: BeginEvent,
     ):
-        log(
+        print(
             f"🔗 AssemblyAI connected "
-            f"(session {event.id})"
+            f"(session {event.id})",
+            flush=True,
         )
+
 
     def on_turn(
         client,
         event: TurnEvent,
     ):
+
         transcript = (
             event.transcript or ""
         ).strip()
@@ -325,37 +283,24 @@ def main():
         if not transcript:
             return
 
-        # ----------------------------------------------------
-        # Speaker
-        # ----------------------------------------------------
-
-        label = getattr(
-            event,
-            "speaker_label",
-            None,
-        )
-
-        speaker = speaker_name(label)
 
         # ----------------------------------------------------
-        # Partial transcript
+        # PARTIAL TRANSCRIPT
         # ----------------------------------------------------
 
         if not event.end_of_turn:
 
-            with print_lock:
-                print(
-                    f"\r\033[K"
-                    f"👂 [{speaker}] "
-                    f"{transcript[-120:]}",
-                    end="",
-                    flush=True,
-                )
+            print(
+                f"\r\033[K👂 {transcript[-120:]}",
+                end="",
+                flush=True,
+            )
 
             return
 
+
         # ----------------------------------------------------
-        # Final transcript
+        # FINAL TRANSCRIPT
         # ----------------------------------------------------
 
         turn_id = getattr(
@@ -364,48 +309,44 @@ def main():
             None,
         )
 
-        if turn_id in seen_turns:
-            return
-
-        seen_turns.add(turn_id)
-
-        log(
-            f"\r\033[K"
-            f"📝 [{speaker}] "
-            f"{transcript}"
+        print(
+            f"\r\033[K📝 {transcript}",
+            flush=True,
         )
 
+
         # ----------------------------------------------------
-        # SEND TO SERVER
+        # SEND ONLY THE TEXT
         # ----------------------------------------------------
 
-        # Submit the HTTP request in another thread so
-        # the AssemblyAI streaming callback is never blocked.
         server_executor.submit(
             send_transcript,
             server_url,
             transcript,
-            label,
         )
+
 
     def on_terminated(
         client,
         event: TerminationEvent,
     ):
-        log(
+        print(
             f"🔚 AssemblyAI session ended "
             f"after "
-            f"{event.audio_duration_seconds:.1f}s"
+            f"{event.audio_duration_seconds:.1f}s",
+            flush=True,
         )
+
 
     def on_error(
         client,
         error: StreamingError,
     ):
-        log(
-            f"\n❌ AssemblyAI error: "
-            f"{error}"
+        print(
+            f"\n❌ AssemblyAI error: {error}",
+            flush=True,
         )
+
 
     # ========================================================
     # REGISTER CALLBACKS
@@ -431,6 +372,7 @@ def main():
         on_error,
     )
 
+
     # ========================================================
     # CONNECT TO ASSEMBLYAI
     # ========================================================
@@ -441,22 +383,21 @@ def main():
             encoding="pcm_s16le",
             speech_model=SPEECH_MODEL,
 
-            # Speaker diarization
-            speaker_labels=True,
-            max_speakers=MAX_SPEAKERS,
-
             # Turn detection
             end_of_turn_confidence_threshold=(
                 END_OF_TURN_CONFIDENCE
             ),
+
             min_end_of_turn_silence_when_confident=(
                 MIN_SILENCE_WHEN_CONFIDENT_MS
             ),
+
             max_turn_silence=(
                 MAX_TURN_SILENCE_MS
             ),
         )
     )
+
 
     # ========================================================
     # START MICROPHONE
@@ -473,29 +414,36 @@ def main():
             callback=audio_callback,
         ):
 
-            log(
-                "🎧 Listening for "
-                "Speaker 1 and Speaker 2..."
+            print(
+                "🎧 Listening...",
+                flush=True,
             )
 
-            log(
-                "📡 Every completed transcript "
-                "will be sent to server.py."
+            print(
+                "📝 Final transcripts are sent "
+                "to server.py.",
+                flush=True,
             )
 
-            log(
-                "Press Ctrl+C to stop.\n"
+            print(
+                "Press Ctrl+C to stop.\n",
+                flush=True,
             )
 
+            # AssemblyAI continuously pulls
+            # audio from this generator.
             client.stream(
                 audio_chunks(stop_event)
             )
 
+
     except KeyboardInterrupt:
 
-        log(
-            "\n🛑 Stopping..."
+        print(
+            "\n🛑 Stopping...",
+            flush=True,
         )
+
 
     finally:
 
