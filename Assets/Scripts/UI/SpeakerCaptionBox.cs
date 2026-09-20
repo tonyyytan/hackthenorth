@@ -41,11 +41,14 @@ namespace HackTheNorth.UI
         [SerializeField] private float fadeDuration = 0.15f;
         [Tooltip("Seconds after the last ShowDialogue() call before auto-hiding. Set to 0 to disable auto-hide.")]
         [SerializeField] private float autoHideDelay = 4f;
+        [Tooltip("Characters/sec for the message reveal. 0 = show instantly, no typewriter effect.")]
+        [SerializeField] private float typewriterCharsPerSec = 45f;
 
         private CanvasGroup canvasGroup;
         private Vector3 velocity;
         private Coroutine fadeRoutine;
         private Coroutine autoHideRoutine;
+        private Coroutine typeRoutine;
         private bool hudParented;
 
         private void Awake()
@@ -104,7 +107,7 @@ namespace HackTheNorth.UI
         public void ShowDialogue(string speakerName, string message)
         {
             if (speakerNameLabel != null) speakerNameLabel.text = speakerName;
-            if (messageLabel != null) messageLabel.text = message;
+            RevealMessage(message);
 
             FadeTo(1f);
 
@@ -118,13 +121,47 @@ namespace HackTheNorth.UI
         /// <summary>Update just the message text of an already-visible box (e.g. streaming transcript).</summary>
         public void UpdateMessage(string message)
         {
-            if (messageLabel != null) messageLabel.text = message;
+            RevealMessage(message);
 
             if (autoHideDelay > 0f)
             {
                 if (autoHideRoutine != null) StopCoroutine(autoHideRoutine);
                 autoHideRoutine = StartCoroutine(AutoHideAfterDelay());
             }
+        }
+
+        /// <summary>
+        /// Reveals text character-by-character rather than popping in all at once — the
+        /// "feels alive, generating in real time" effect (Cluely-style) rather than a static
+        /// panel that just changes. Skipped entirely (instant set) if the text is unchanged,
+        /// so re-showing the same cached result doesn't replay the animation every poll.
+        /// </summary>
+        private void RevealMessage(string message)
+        {
+            if (messageLabel == null) return;
+            message ??= string.Empty;
+
+            if (typeRoutine != null) StopCoroutine(typeRoutine);
+            if (typewriterCharsPerSec <= 0f || message == messageLabel.text)
+            {
+                messageLabel.text = message;
+                return;
+            }
+            typeRoutine = StartCoroutine(TypewriterRoutine(message));
+        }
+
+        private IEnumerator TypewriterRoutine(string message)
+        {
+            messageLabel.text = string.Empty;
+            float secondsPerChar = 1f / typewriterCharsPerSec;
+            var builder = new System.Text.StringBuilder(message.Length);
+            for (int i = 0; i < message.Length; i++)
+            {
+                builder.Append(message[i]);
+                messageLabel.text = builder.ToString();
+                yield return new WaitForSeconds(secondsPerChar);
+            }
+            typeRoutine = null;
         }
 
         public void Hide()
