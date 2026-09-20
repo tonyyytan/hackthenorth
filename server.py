@@ -149,7 +149,12 @@ _ocr_pool = ThreadPoolExecutor(max_workers=1)
 
 
 def badge_roster():
-    return {pid: p["name"] for pid, p in PROFILES.items() if p.get("name")}
+    """{person_id: display_name} for everyone matchable by name -- badge OCR and the
+    utterance name-matcher both use this. Falls back to a title-cased person_id for
+    anyone with an enrolled face but no people.db profile yet (e.g. faces/thor.jpg with
+    no row in people.db), so matching still works before profiles are seeded."""
+    return {pid: PROFILES.get(pid, {}).get("name") or pid.replace("-", " ").title()
+            for pid in NAMES}
 
 
 # ponytail: one wearer, one camera, so a module-level track list is enough.
@@ -249,26 +254,45 @@ async def post_id(request: Request, frame_id: int = -1, hfov: float = DEFAULT_HF
         return {"frame_id": frame_id, "faces": [], "error": str(e)}
 
 
+def _name_from_utterance_text(text):
+    """The Pi's live_audio_parser.py sends {"name","occupation","affiliation"} extracted
+    by Gemini from what was actually said, as a JSON string. If that name matches someone
+    in the enrolled roster (same fuzzy match badge.py uses for badge OCR), we can attribute
+    the utterance to them WITHOUT needing a working face match -- audio alone can identify
+    who's being talked about, which matters since Quest passthrough-camera access isn't
+    confirmed working yet. Returns a person_id or None."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    if not name:
+        return None
+    pid, score = badge.match_roster([(name, 1.0)], badge_roster())
+    return pid
+
+
 @api.post("/utterance")
 async def utterance(msg: dict):
     """{"person_id": "alana-goyal", "text": "..."} from the Pi, or {"audio_b64": <wav>}
-    from the Quest mic. person_id defaults to whoever is biggest in frame (FOCUS);
+    from the Quest mic. person_id defaults to: explicit person_id, else a name spotted
+    in the text (see _name_from_utterance_text), else FOCUS (biggest face in frame),
+    else "unknown" -- the Pi hears people the camera never sees, and an utterance with
+    no person id is dropped.
     audio without text is transcribed by OpenAI. The insight call runs in the
     background -- only the transcription is waited on.
     "force": true skips the normal 4-utterances/15s batching gate -- for manual
     testing/demoing (see talk.py) where one typed line should get an answer now."""
-    # "unknown" when no face has been identified yet: the Pi hears people the camera
-    # has not seen, and brain.add_utterance drops anything with no pid. Insight then
-    # comes from the transcript alone -- image and profile are both optional -- and
-    # brain.latest() surfaces it on the no-camera overlay.
-    pid = msg.get("person_id") or FOCUS or "unknown"
     audio = base64.b64decode(msg["audio_b64"]) if msg.get("audio_b64") else None
     text = msg.get("text") or ""
     if audio and not text:
         try:
             text = await run_in_threadpool(brain.transcribe, audio)
         except Exception as e:
-            return {"ok": False, "person_id": pid, "text": "", "error": f"stt: {e}"}
+            return {"ok": False, "person_id": msg.get("person_id"), "text": "", "error": f"stt: {e}"}
+    # "unknown" last: image and profile are both optional, so the insight still comes
+    # from the transcript alone and brain.latest() puts it on the no-camera overlay.
+    pid = msg.get("person_id") or _name_from_utterance_text(text) or FOCUS or "unknown"
     photo = PHOTOS.get(pid)
     image = cv2.imencode(".jpg", photo)[1].tobytes() if photo is not None and photo.size else None
     fired = brain.add_utterance(pid, text, PROFILES.get(pid), image=image, audio=audio,
