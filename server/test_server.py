@@ -272,6 +272,38 @@ def test_request_log_limiter_is_per_source_method_and_path():
     assert limiter.record("pi", "POST", "/utterance", now=0.1) == 0
 
 
+def test_refresh_interval_starts_after_previous_result_is_published():
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_times = []
+
+    def generate(*args):
+        call_times.append(time.monotonic())
+        if len(call_times) == 1:
+            first_started.set()
+            release_first.wait(timeout=1)
+        return {"headline": "Update", "talking_points": [], "suggested_question": ""}
+
+    manager = ConversationManager(generate, refresh_seconds=0.05)
+    try:
+        session_id = manager.start()
+        accepted, error = manager.provide_research(
+            session_id, "alex", {"name": "Alex"}, "Verbose", ["Concise"]
+        )
+        assert accepted and error is None
+        assert first_started.wait(timeout=1)
+        time.sleep(0.07)  # Longer than the interval while generation is still running.
+        release_first.set()
+        wait_for(lambda: manager.panel_two()["version"] == 1)
+        time.sleep(0.025)
+        assert len(call_times) == 1, "refresh must not be overdue when a slow call completes"
+        wait_for(lambda: len(call_times) == 2)
+        assert call_times[1] - call_times[0] >= 0.1
+    finally:
+        release_first.set()
+        manager.close()
+
+
 def test_pipeline_logging_covers_trigger_identity_research_and_panels():
     manager = ConversationManager(
         lambda *args: {
@@ -337,6 +369,7 @@ if __name__ == "__main__":
         test_combined_research_context_keeps_every_concise_item()
         test_latest_frame_resolver_uses_new_database_columns()
         test_request_log_limiter_is_per_source_method_and_path()
+        test_refresh_interval_starts_after_previous_result_is_published()
         test_pipeline_logging_covers_trigger_identity_research_and_panels()
         print(f"ok (FACE_WIDTH_M={FACE_WIDTH_M})")
     finally:

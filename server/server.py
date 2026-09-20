@@ -211,7 +211,7 @@ class ConversationManager:
         self.refresh_seconds = float(
             refresh_seconds
             if refresh_seconds is not None
-            else os.environ.get("TALKING_POINT_REFRESH_SECONDS", "4")
+            else os.environ.get("TALKING_POINT_REFRESH_SECONDS", "10")
         )
         self.lock = threading.RLock()
         self.wake = threading.Event()
@@ -311,7 +311,6 @@ class ConversationManager:
                 "profile": {},
                 "research": None,
                 "generation_inflight": False,
-                "last_generation_started": 0.0,
                 "next_generation_at": 0.0,
                 "talking_points_version": 0,
                 "talking_points": None,
@@ -468,7 +467,6 @@ class ConversationManager:
                     and session["research"] is not None
                     and not session["generation_inflight"]
                     and now >= session["next_generation_at"]
-                    and now - session["last_generation_started"] >= self.refresh_seconds
                 ):
                     self._start_generation_locked(session)
 
@@ -476,7 +474,6 @@ class ConversationManager:
         if session["research"] is None or session["generation_inflight"]:
             return
         session["generation_inflight"] = True
-        session["last_generation_started"] = time.monotonic()
         self.workers.submit(
             self._generation_worker,
             session["id"],
@@ -513,7 +510,9 @@ class ConversationManager:
             if session is None:
                 return
             session["generation_inflight"] = False
-            session["next_generation_at"] = 0.0
+            # Measure refresh cadence from publication, not generation start. A slow
+            # provider must never make the next call immediately "overdue".
+            session["next_generation_at"] = time.monotonic() + self.refresh_seconds
             session["talking_points_version"] += 1
             session["talking_points"] = dict(points)
             session["last_error"] = None
@@ -693,7 +692,7 @@ def log_pipeline_event(event, **payload):
 
 
 def configure_identity_image_override(enabled):
-    """Use Ashley's fixed screenshot instead of the image posted to /id."""
+    """Preload Ashley's screenshot and use it instead of images posted to /id."""
     global IDENTITY_IMAGE_OVERRIDE
     if not enabled:
         IDENTITY_IMAGE_OVERRIDE = None
@@ -705,6 +704,9 @@ def configure_identity_image_override(enabled):
     if cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) is None:
         raise RuntimeError(f"Ashley image is not decodable: {ASHLEY_IMAGE_PATH}")
     IDENTITY_IMAGE_OVERRIDE = jpeg
+    # Conversation start resolves the newest cached frame. Seed that cache here so
+    # --log-no-picture works even when the Quest never sends a POST /id request.
+    _remember_latest_frame(jpeg, frame_id=-1, hfov=DEFAULT_HFOV)
 
 
 @api.middleware("http")
