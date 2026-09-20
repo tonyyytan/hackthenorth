@@ -39,11 +39,25 @@ cp server/.env.example server/.env
 python3 -m server.server
 ```
 
-To log HTTP request metadata, without logging transcript or image bodies:
+To log HTTP request metadata, transcript chunks, triggers, face-match confidence,
+research context, and panel updates (image bytes are never logged):
 
 ```bash
 python3 -m server.server --log
 ```
+
+To enable the same logging while always identifying Ashley from the fixed local
+screenshot instead of the image posted by the Quest:
+
+```bash
+python3 -m server.server --log-no-picture
+```
+
+Both flags enable the same pipeline logging. `--log-no-picture` additionally replaces
+every image posted to `/id` with the fixed Ashley screenshot. Pipeline lines are tagged
+as `trigger_detected`, `image_parsed`, `research_context`, `panel1_update`, and
+`panel2_update`; failures are tagged `pipeline_error`. Research logs intentionally
+include the full verbose model context.
 
 Repeated requests from the same client IP to the same method/path are logged at most
 once every 0.5 seconds, with suppressed repeats counted on the next line. This interval
