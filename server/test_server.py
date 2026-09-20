@@ -5,13 +5,18 @@ import json
 import threading
 import time
 
+from fastapi.testclient import TestClient
+
+from . import server as backend
 from .server import (
     CONVERSATIONS,
     FACE_WIDTH_M,
     ConversationManager,
     RequestLogLimiter,
+    _parse_talking_point_bullets,
     _remember_identity_result,
     _remember_latest_frame,
+    _render_talking_point,
     _research_list,
     combine_research_context,
     configure_request_logging,
@@ -130,6 +135,76 @@ def test_triggers_across_chunks_and_no_active_restart():
         manager.close()
 
 
+def test_utterance_endpoint_exit_trigger_clears_panels_and_resets_session():
+    def resolve():
+        return {
+            "person_id": "ashley-moon",
+            "profile": {"name": "Ashley Moon"},
+            "verbose": "Ashley context",
+            "concise": ["Ashley fact"],
+            "sources": [],
+        }
+
+    manager = ConversationManager(
+        lambda *args: {
+            "headline": "",
+            "talking_points": ["**Follow-up:** Ask what comes next."],
+            "suggested_question": "",
+        },
+        refresh_seconds=10,
+        start_phrases=["hello"],
+        end_phrases=["exit"],
+        identity_resolver=resolve,
+    )
+    original_manager = backend.CONVERSATIONS
+    original_add_utterance = backend.brain.add_utterance
+    original_get = backend.brain.get
+    backend.CONVERSATIONS = manager
+    backend.brain.add_utterance = lambda *args, **kwargs: False
+    backend.brain.get = lambda *args, **kwargs: None
+    client = TestClient(backend.api)
+    try:
+        started = client.post(
+            "/utterance", json={"chunk_id": "http:1", "text": "Hello, I'm Andrew."}
+        )
+        assert started.status_code == 200
+        first_session_id = started.json()["conversation"]["session_id"]
+        assert first_session_id
+        wait_for(lambda: bool(client.get("/conversation/panel2").json()["text"]))
+        assert client.get("/conversation/panel1").json()["text"]
+
+        ended = client.post(
+            "/utterance", json={"chunk_id": "http:2", "text": "Okay, EXIT!!!"}
+        )
+        assert ended.status_code == 200
+        assert ended.json()["conversation"] == {
+            "active": False,
+            "session_id": None,
+            "history_count": 0,
+        }
+        assert client.get("/conversation/panel1").json()["text"] == ""
+        assert client.get("/conversation/panel2").json()["text"] == ""
+
+        events = client.get("/conversation/events", params={"after": 0}).json()["events"]
+        ended_event = next(event for event in reversed(events) if event["type"] == "conversation_ended")
+        assert ended_event["session_id"] == first_session_id
+        assert ended_event["reason"] == "trigger"
+        assert ended_event["trigger"] == "exit"
+
+        restarted = client.post(
+            "/utterance", json={"chunk_id": "http:3", "text": "hello"}
+        ).json()["conversation"]
+        assert restarted["active"]
+        assert restarted["session_id"] != first_session_id
+        assert restarted["history_count"] == 0
+    finally:
+        client.close()
+        backend.CONVERSATIONS = original_manager
+        backend.brain.add_utterance = original_add_utterance
+        backend.brain.get = original_get
+        manager.close()
+
+
 def test_ended_session_discards_slow_generation():
     release = threading.Event()
 
@@ -244,6 +319,20 @@ def test_combined_research_context_keeps_every_concise_item():
     assert "Fact 7" in combined
 
 
+def test_bullet_only_gemini_response_is_parsed_and_rendered_for_quest():
+    points = _parse_talking_point_bullets(
+        "* **Project challenge:** Ask what proved hardest.\n"
+        "- **Future direction:** Ask what they want to explore next."
+    )
+    assert points == [
+        "**Project challenge:** Ask what proved hardest.",
+        "**Future direction:** Ask what they want to explore next.",
+    ]
+    assert _render_talking_point(points[0]) == (
+        "• <b>Project challenge:</b> Ask what proved hardest."
+    )
+
+
 def test_latest_frame_resolver_uses_new_database_columns():
     token = _remember_latest_frame(b"jpeg", 7, 80.0)
     _remember_identity_result(token, {
@@ -330,11 +419,13 @@ if __name__ == "__main__":
         test_iou()
         test_conversation_lifecycle()
         test_triggers_across_chunks_and_no_active_restart()
+        test_utterance_endpoint_exit_trigger_clears_panels_and_resets_session()
         test_ended_session_discards_slow_generation()
         test_latest_identity_populates_and_clears_panels()
         test_failed_identity_ends_conversation_and_blanks_panels()
         test_research_list_accepts_sqlite_text_formats()
         test_combined_research_context_keeps_every_concise_item()
+        test_bullet_only_gemini_response_is_parsed_and_rendered_for_quest()
         test_latest_frame_resolver_uses_new_database_columns()
         test_request_log_limiter_is_per_source_method_and_path()
         test_pipeline_logging_covers_trigger_identity_research_and_panels()
