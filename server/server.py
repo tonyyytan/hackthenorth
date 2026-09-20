@@ -205,15 +205,16 @@ class ConversationManager:
         self.generate = talking_point_generator
         self.resolve_identity = identity_resolver
         self.start_phrases = start_phrases or _parse_phrases(
-            "CONVERSATION_START_PHRASES", "start conversation"
+            "CONVERSATION_START_PHRASES", "hi,hello,start conversation"
         )
         self.end_phrases = end_phrases or _parse_phrases(
-            "CONVERSATION_END_PHRASES", "bye,goodbye,see you later,end conversation"
+            "CONVERSATION_END_PHRASES",
+            "bye,goodbye,good bye,see you later,end conversation,exit,exit conversation,stop conversation",
         )
         self.refresh_seconds = float(
             refresh_seconds
             if refresh_seconds is not None
-            else os.environ.get("TALKING_POINT_REFRESH_SECONDS", "4")
+            else os.environ.get("TALKING_POINT_REFRESH_SECONDS", "10")
         )
         self.lock = threading.RLock()
         self.wake = threading.Event()
@@ -313,7 +314,6 @@ class ConversationManager:
                 "profile": {},
                 "research": None,
                 "generation_inflight": False,
-                "last_generation_started": 0.0,
                 "next_generation_at": 0.0,
                 "talking_points_version": 0,
                 "talking_points": None,
@@ -470,7 +470,6 @@ class ConversationManager:
                     and session["research"] is not None
                     and not session["generation_inflight"]
                     and now >= session["next_generation_at"]
-                    and now - session["last_generation_started"] >= self.refresh_seconds
                 ):
                     self._start_generation_locked(session)
 
@@ -478,7 +477,6 @@ class ConversationManager:
         if session["research"] is None or session["generation_inflight"]:
             return
         session["generation_inflight"] = True
-        session["last_generation_started"] = time.monotonic()
         self.workers.submit(
             self._generation_worker,
             session["id"],
@@ -515,7 +513,7 @@ class ConversationManager:
             if session is None:
                 return
             session["generation_inflight"] = False
-            session["next_generation_at"] = 0.0
+            session["next_generation_at"] = time.monotonic() + self.refresh_seconds
             session["talking_points_version"] += 1
             session["talking_points"] = dict(points)
             session["last_error"] = None
@@ -696,7 +694,7 @@ def log_pipeline_event(event, **payload):
 
 
 def configure_identity_image_override(enabled):
-    """Use Ashley's fixed screenshot instead of the image posted to /id."""
+    """Preload Ashley's screenshot and use it instead of images posted to /id."""
     global IDENTITY_IMAGE_OVERRIDE
     if not enabled:
         IDENTITY_IMAGE_OVERRIDE = None
@@ -708,6 +706,7 @@ def configure_identity_image_override(enabled):
     if cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) is None:
         raise RuntimeError(f"Ashley image is not decodable: {ASHLEY_IMAGE_PATH}")
     IDENTITY_IMAGE_OVERRIDE = jpeg
+    _remember_latest_frame(jpeg, frame_id=-1, hfov=DEFAULT_HFOV)
 
 
 @api.middleware("http")
@@ -1160,17 +1159,14 @@ async def reload():
 #   GET  /conversation/panel2   -- bottom panel: live conversational suggestion/tip
 @api.get("/conversation/panel1")
 async def conversation_panel1():
-    """Top panel: bullet-point facts about whoever the Quest currently has in view (FOCUS)."""
-    pid = FOCUS
-    return {"person_id": pid, "profile": PROFILES.get(pid) if pid else None}
+    """Top panel: concise research for the active conversation, blank when inactive."""
+    return CONVERSATIONS.panel_one()
 
 
 @api.get("/conversation/panel2")
 async def conversation_panel2():
-    """Bottom panel: live conversational suggestion for whoever the Quest currently has in view."""
-    pid = FOCUS
-    return {"person_id": pid, "insight": brain.get(pid) if pid else None,
-            "researching": brain.is_researching(pid) if pid else False}
+    """Bottom panel: generated suggestions for the active conversation, blank when inactive."""
+    return CONVERSATIONS.panel_two()
 
 
 @api.get("/debug/latest_insight")
@@ -1260,6 +1256,8 @@ if __name__ == "__main__":
 
     lan = socket.gethostbyname(socket.gethostname())
     print(f"{len(NAMES)} enrolled: {', '.join(NAMES) or 'nobody'}")
+    print(f"Start triggers: {', '.join(CONVERSATIONS.start_phrases)}")
+    print(f"End triggers:   {', '.join(CONVERSATIONS.end_phrases)}")
     print(f"Quest posts to  http://{lan}:8000/id?frame_id=N   (NOT localhost)")
     print(f"Broadcasting presence on UDP {DISCOVERY_PORT} for auto-discovery")
     if args.log or args.log_no_picture:

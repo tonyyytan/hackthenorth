@@ -5,6 +5,9 @@ import json
 import threading
 import time
 
+from fastapi.testclient import TestClient
+
+from . import server as backend
 from .server import (
     CONVERSATIONS,
     FACE_WIDTH_M,
@@ -129,6 +132,76 @@ def test_triggers_across_chunks_and_no_active_restart():
         manager.ingest("bye", chunk_id="split:5")
         assert not manager.state()["active"]
     finally:
+        manager.close()
+
+
+def test_utterance_endpoint_exit_trigger_clears_panels_and_resets_session():
+    def resolve():
+        return {
+            "person_id": "ashley-moon",
+            "profile": {"name": "Ashley Moon"},
+            "verbose": "Ashley context",
+            "concise": ["Ashley fact"],
+            "sources": [],
+        }
+
+    manager = ConversationManager(
+        lambda *args: {
+            "headline": "",
+            "talking_points": ["**Follow-up:** Ask what comes next."],
+            "suggested_question": "",
+        },
+        refresh_seconds=10,
+        start_phrases=["hello"],
+        end_phrases=["exit"],
+        identity_resolver=resolve,
+    )
+    original_manager = backend.CONVERSATIONS
+    original_add_utterance = backend.brain.add_utterance
+    original_get = backend.brain.get
+    backend.CONVERSATIONS = manager
+    backend.brain.add_utterance = lambda *args, **kwargs: False
+    backend.brain.get = lambda *args, **kwargs: None
+    client = TestClient(backend.api)
+    try:
+        started = client.post(
+            "/utterance", json={"chunk_id": "http:1", "text": "Hello, I'm Andrew."}
+        )
+        assert started.status_code == 200
+        first_session_id = started.json()["conversation"]["session_id"]
+        assert first_session_id
+        wait_for(lambda: bool(client.get("/conversation/panel2").json()["text"]))
+        assert client.get("/conversation/panel1").json()["text"]
+
+        ended = client.post(
+            "/utterance", json={"chunk_id": "http:2", "text": "Okay, EXIT!!!"}
+        )
+        assert ended.status_code == 200
+        assert ended.json()["conversation"] == {
+            "active": False,
+            "session_id": None,
+            "history_count": 0,
+        }
+        assert client.get("/conversation/panel1").json()["text"] == ""
+        assert client.get("/conversation/panel2").json()["text"] == ""
+
+        events = client.get("/conversation/events", params={"after": 0}).json()["events"]
+        ended_event = next(event for event in reversed(events) if event["type"] == "conversation_ended")
+        assert ended_event["session_id"] == first_session_id
+        assert ended_event["reason"] == "trigger"
+        assert ended_event["trigger"] == "exit"
+
+        restarted = client.post(
+            "/utterance", json={"chunk_id": "http:3", "text": "hello"}
+        ).json()["conversation"]
+        assert restarted["active"]
+        assert restarted["session_id"] != first_session_id
+        assert restarted["history_count"] == 0
+    finally:
+        client.close()
+        backend.CONVERSATIONS = original_manager
+        backend.brain.add_utterance = original_add_utterance
+        backend.brain.get = original_get
         manager.close()
 
 
@@ -346,6 +419,7 @@ if __name__ == "__main__":
         test_iou()
         test_conversation_lifecycle()
         test_triggers_across_chunks_and_no_active_restart()
+        test_utterance_endpoint_exit_trigger_clears_panels_and_resets_session()
         test_ended_session_discards_slow_generation()
         test_latest_identity_populates_and_clears_panels()
         test_failed_identity_ends_conversation_and_blanks_panels()
