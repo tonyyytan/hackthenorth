@@ -34,6 +34,7 @@ Standalone self-test (no mic needed):
 import argparse
 import base64
 import json
+import os
 import socket
 import urllib.request
 
@@ -44,7 +45,17 @@ DISCOVERY_MAGIC = b"HACKTHENORTH_ID_SERVER:"
 def discover(timeout=15.0):
     """Blocks until server.py's presence broadcast is heard, returns 'http://ip:port'.
     Raises TimeoutError if nothing is heard -- check both devices are on the same
-    network and that server.py is actually running."""
+    network and that server.py is actually running.
+
+    If the SERVER_URL env var is set, returns it immediately with no network wait --
+    some networks (e.g. phone personal hotspots) restrict broadcast/multicast between
+    connected clients even though normal HTTP between them works fine. Set this as a
+    manual fallback: SERVER_URL=http://<lan-ip>:8000"""
+    override = os.environ.get("SERVER_URL")
+    if override:
+        print(f"pi_client: using SERVER_URL override: {override}")
+        return override
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", DISCOVERY_PORT))
