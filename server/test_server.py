@@ -7,6 +7,7 @@ from .server import (
     CONVERSATIONS,
     FACE_WIDTH_M,
     ConversationManager,
+    RequestLogLimiter,
     _remember_identity_result,
     _remember_latest_frame,
     _research_list,
@@ -240,6 +241,16 @@ def test_latest_frame_resolver_uses_new_database_columns():
     assert result["concise"] == ["First bullet", "Second bullet"]
 
 
+def test_request_log_limiter_is_per_source_method_and_path():
+    limiter = RequestLogLimiter(0.5)
+    assert limiter.record("quest", "GET", "/conversation/panel1", now=0.0) == 0
+    assert limiter.record("quest", "GET", "/conversation/panel1", now=0.1) is None
+    assert limiter.record("quest", "GET", "/conversation/panel1", now=0.49) is None
+    assert limiter.record("quest", "GET", "/conversation/panel1", now=0.5) == 2
+    assert limiter.record("quest", "GET", "/conversation/panel2", now=0.1) == 0
+    assert limiter.record("pi", "POST", "/utterance", now=0.1) == 0
+
+
 if __name__ == "__main__":
     try:
         test_distance()
@@ -251,6 +262,7 @@ if __name__ == "__main__":
         test_failed_identity_ends_conversation_and_blanks_panels()
         test_research_list_accepts_sqlite_text_formats()
         test_latest_frame_resolver_uses_new_database_columns()
+        test_request_log_limiter_is_per_source_method_and_path()
         print(f"ok (FACE_WIDTH_M={FACE_WIDTH_M})")
     finally:
         CONVERSATIONS.close()

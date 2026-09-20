@@ -24,6 +24,7 @@ The filename/foldername is the canonical person id everywhere in the system.
 Run from the repository root: python3 -m server.server
 """
 import base64
+import argparse
 import json
 import math
 import os
@@ -562,6 +563,68 @@ app_fa.prepare(ctx_id=-1, det_size=(DET_SIZE, DET_SIZE))
 api = FastAPI()
 
 
+class RequestLogLimiter:
+    """Thread-safe duplicate-log limiter; never delays or rejects an HTTP request."""
+
+    def __init__(self, interval_seconds=0.5):
+        self.interval_seconds = max(float(interval_seconds), 0.0)
+        self.lock = threading.Lock()
+        self.entries = {}
+
+    def record(self, source, method, path, now=None):
+        """Return suppressed-repeat count when this request should log, else None."""
+        now = time.monotonic() if now is None else now
+        key = (source, method, path)
+        with self.lock:
+            previous = self.entries.get(key)
+            if previous is not None and now - previous[0] < self.interval_seconds:
+                self.entries[key] = (previous[0], previous[1] + 1)
+                return None
+            suppressed = previous[1] if previous is not None else 0
+            self.entries[key] = (now, 0)
+            return suppressed
+
+
+REQUEST_LOGGING_ENABLED = False
+REQUEST_LOG_LIMITER = RequestLogLimiter()
+
+
+def configure_request_logging(enabled, interval_seconds=0.5):
+    global REQUEST_LOGGING_ENABLED, REQUEST_LOG_LIMITER
+    REQUEST_LOGGING_ENABLED = bool(enabled)
+    REQUEST_LOG_LIMITER = RequestLogLimiter(interval_seconds)
+
+
+@api.middleware("http")
+async def log_http_request(request: Request, call_next):
+    """Optional metadata-only request log enabled by the CLI's --log flag."""
+    if not REQUEST_LOGGING_ENABLED:
+        return await call_next(request)
+
+    source = request.client.host if request.client else "unknown"
+    method = request.method.upper()
+    path = request.url.path
+    query = request.url.query
+    display_target = f"{path}?{query}" if query else path
+    suppressed = REQUEST_LOG_LIMITER.record(source, method, path)
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if suppressed is not None:
+            elapsed_ms = round((time.perf_counter() - started) * 1000)
+            repeats = f" (+{suppressed} suppressed)" if suppressed else ""
+            timestamp = time.strftime("%H:%M:%S")
+            print(
+                f"[http {timestamp}] {source} {method} {display_target} "
+                f"-> {status_code} {elapsed_ms}ms{repeats}",
+                flush=True,
+            )
+
+
 def enroll():
     """faces/<name>.jpg or faces/<name>/*.jpg -> (names, embeddings, owner index)."""
     names, embs, owner = [], [], []
@@ -990,9 +1053,31 @@ def _broadcast_presence():
 
 if __name__ == "__main__":
     import uvicorn
+    parser = argparse.ArgumentParser(description="Run the networking-assistant server.")
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Log GET/POST request metadata without logging bodies.",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=float,
+        default=0.5,
+        metavar="SECONDS",
+        help="Minimum interval between duplicate log lines per client/method/path (default: 0.5).",
+    )
+    args = parser.parse_args()
+    if args.log_interval < 0:
+        parser.error("--log-interval must be zero or greater")
+    configure_request_logging(args.log, args.log_interval)
+
     lan = socket.gethostbyname(socket.gethostname())
     print(f"{len(NAMES)} enrolled: {', '.join(NAMES) or 'nobody'}")
     print(f"Quest posts to  http://{lan}:8000/id?frame_id=N   (NOT localhost)")
     print(f"Broadcasting presence on UDP {DISCOVERY_PORT} for auto-discovery")
+    if args.log:
+        print(
+            f"HTTP request logging enabled (duplicate interval: {args.log_interval:.3g}s)"
+        )
     threading.Thread(target=_broadcast_presence, daemon=True).start()
-    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(api, host="0.0.0.0", port=8000, log_level="info", access_log=False)

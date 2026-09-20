@@ -39,6 +39,17 @@ cp server/.env.example server/.env
 python3 -m server.server
 ```
 
+To log HTTP request metadata, without logging transcript or image bodies:
+
+```bash
+python3 -m server.server --log
+```
+
+Repeated requests from the same client IP to the same method/path are logged at most
+once every 0.5 seconds, with suppressed repeats counted on the next line. This interval
+only throttles console output; it never delays a Pi or Quest request. Override it with
+`--log-interval SECONDS`, or use `--log-interval 0` to print every request.
+
 Set `GEMINI_API_KEY` in `server/.env`. For a keyless local integration test, set
 `TALKING_POINTS_PROVIDER=dummy`. Also replace the default start phrase before the demo.
 Run exactly one server process/worker for this prototype because conversation state and
