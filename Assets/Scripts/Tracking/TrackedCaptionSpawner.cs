@@ -13,7 +13,10 @@ namespace HackTheNorth.Tracking
     public class TrackedCaptionSpawner : MonoBehaviour
     {
         [SerializeField] private TrackedTargetRegistry registry;
-        [SerializeField] private Vector3 worldOffset = new Vector3(0f, 0.15f, 0f);
+        [Tooltip("How far to the side of the tracked point the box sits, so it doesn't cover the person/object itself.")]
+        [SerializeField] private float lateralOffset = 0.5f;
+        [Tooltip("How far above the tracked point the box sits.")]
+        [SerializeField] private float verticalOffset = 0.35f;
         [SerializeField] private Camera faceCamera;
 
         private readonly Dictionary<string, SpeakerCaptionBox> captionBoxes = new();
@@ -42,7 +45,8 @@ namespace HackTheNorth.Tracking
             // comments) GameObject as EnvironmentRaycastManager, and a spawned caption box must
             // stay active/visible regardless of that parent's state.
             SpeakerCaptionBox box = SpeakerCaptionBoxFactory.Create(null);
-            box.ConfigureWorldAnchor(target.transform, worldOffset, faceCamera != null ? faceCamera.transform : null);
+            Vector3 sideOffset = ComputeSideOffset(target.transform.position);
+            box.ConfigureWorldAnchor(target.transform, sideOffset, faceCamera != null ? faceCamera.transform : null);
             captionBoxes[trackId] = box;
             return box;
         }
@@ -53,6 +57,25 @@ namespace HackTheNorth.Tracking
             if (!captionBoxes.TryGetValue(trackId, out SpeakerCaptionBox box)) return;
             captionBoxes.Remove(trackId);
             if (box != null) Destroy(box.gameObject);
+        }
+
+        /// <summary>
+        /// Offsets the box to whichever side of the target is away from the wearer's view
+        /// direction (computed once, at anchor time, from the wearer's position) plus a fixed
+        /// height above — so it reads as "next to" the person/object instead of covering them.
+        /// A pure world-space offset (e.g. always +X) would drift onto the target itself
+        /// depending on which direction the wearer is actually standing relative to it.
+        /// </summary>
+        private Vector3 ComputeSideOffset(Vector3 targetPosition)
+        {
+            Vector3 wearerPos = faceCamera != null ? faceCamera.transform.position : targetPosition + Vector3.back;
+            Vector3 toTarget = targetPosition - wearerPos;
+            toTarget.y = 0f;
+            Vector3 sideDir = toTarget.sqrMagnitude > 0.0001f
+                ? Vector3.Cross(Vector3.up, toTarget.normalized)
+                : Vector3.right;
+
+            return sideDir * lateralOffset + Vector3.up * verticalOffset;
         }
     }
 }
