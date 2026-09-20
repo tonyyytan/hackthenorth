@@ -77,8 +77,10 @@ def discover(timeout=15.0):
 
 
 def _post(server_url, payload, timeout=15.0):
+    # A trailing slash on server_url (easy to type, e.g. SERVER_URL=http://ip:8000/)
+    # would otherwise produce //utterance, which the server 404s on.
     req = urllib.request.Request(
-        f"{server_url}/utterance", data=json.dumps(payload).encode(),
+        f"{server_url.rstrip('/')}/utterance", data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
