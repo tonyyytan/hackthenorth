@@ -10,7 +10,7 @@ namespace HackTheNorth.Speech
     /// </summary>
     public class StubSpeechToText : MonoBehaviour, ISpeechToText
     {
-        public event Action<string, bool> OnTranscript;
+        public event Action<string, string, bool> OnTranscript;
 
         public void SubmitAudio(float[] samples, int sampleRate)
         {
@@ -18,10 +18,12 @@ namespace HackTheNorth.Speech
         }
 
         // Call this manually (e.g. from the Inspector or a test script) to simulate a result
-        // arriving until a real STT backend is wired in.
-        public void SimulateTranscript(string text, bool isFinal)
+        // arriving until a real STT backend is wired in. speakerLabel defaults to "A" (this
+        // stub doesn't simulate multiple speakers) — pass a different label to test the
+        // wearer-vs-other-speaker routing in CaptionPipeline.
+        public void SimulateTranscript(string text, bool isFinal, string speakerLabel = "A")
         {
-            OnTranscript?.Invoke(text, isFinal);
+            OnTranscript?.Invoke(text, speakerLabel, isFinal);
         }
     }
 }

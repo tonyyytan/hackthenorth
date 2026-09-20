@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -18,13 +19,15 @@ namespace HackTheNorth.Speech
     /// committed) or the apiKeyFallback field in the Inspector (only for local testing; do NOT
     /// commit a real key typed into a scene/prefab).
     ///
-    /// NOT verified against a live AssemblyAI account in this session (no API key available) —
-    /// this implements the protocol exactly as documented as of the research done for this
-    /// feature (see CLAUDE.md), but connecting for the first time with a real key is the
-    /// remaining verification step. One documented ambiguity: some AssemblyAI docs say
-    /// `speech_model` is required with no default, others say it defaults to
-    /// `universal-3-5-pro` — this implementation omits it and lets the server default; if
-    /// connection fails, try setting speechModel explicitly.
+    /// Verified live this session: connects, receives Begin/SpeechStarted/Turn messages, and
+    /// real speech transcribes correctly end-to-end onto SpeakerCaptionBox (audio must be
+    /// re-chunked into 50-1000ms frames first — see SubmitAudio's comment, AssemblyAI's server
+    /// rejects anything outside that window with error_code 3007).
+    ///
+    /// Diarization (speakerLabels=true, the default) distinguishes acoustic voices ("A", "B",
+    /// ...) so CaptionPipeline can tell the wearer's voice apart from someone else's — see its
+    /// comments for the wearer-identification heuristic. Not yet verified with two real
+    /// speakers (only tested solo this session).
     /// </summary>
     public class AssemblyAiStreamingSpeechToText : MonoBehaviour, ISpeechToText
     {
@@ -34,16 +37,21 @@ namespace HackTheNorth.Speech
         [SerializeField] private bool formatTurns = true;
         [Tooltip("min_latency prioritizes real-time responsiveness over transcription accuracy — right for a live voice-query use case.")]
         [SerializeField] private string mode = "min_latency";
-        [Tooltip("Leave blank to let the server pick a default (see class-level ambiguity note). Only set this if connecting without it fails.")]
+        [Tooltip("Leave blank to let the server pick a default. Only set this if connecting without it fails (confirmed working blank in this session).")]
         [SerializeField] private string speechModel = "";
+        [Tooltip("Distinguishes acoustic voices (wearer vs. another nearby person) via AssemblyAI's real-time diarization.")]
+        [SerializeField] private bool speakerLabels = true;
+        [Tooltip("Optional hint for diarization (1-10). 0 = let the server decide.")]
+        [SerializeField] private int maxSpeakers = 0;
 
-        public event Action<string, bool> OnTranscript;
+        public event Action<string, string, bool> OnTranscript;
 
         private ClientWebSocket socket;
         private CancellationTokenSource cts;
         private bool isConnecting;
 
         public int SampleRate => sampleRate;
+        public int FramesSent => framesSent;
 
         private void OnEnable()
         {
@@ -99,6 +107,8 @@ namespace HackTheNorth.Speech
 
             string url = $"wss://streaming.assemblyai.com/v3/ws?sample_rate={sampleRate}&encoding=pcm_s16le&format_turns={(formatTurns ? "true" : "false")}&mode={mode}";
             if (!string.IsNullOrEmpty(speechModel)) url += $"&speech_model={speechModel}";
+            if (speakerLabels) url += "&speaker_labels=true";
+            if (maxSpeakers > 0) url += $"&max_speakers={maxSpeakers}";
 
             try
             {
@@ -160,9 +170,11 @@ namespace HackTheNorth.Speech
                 case "Turn":
                     string transcript = ExtractStringField(json, "transcript");
                     bool endOfTurn = ExtractBoolField(json, "end_of_turn");
+                    string speakerLabel = ExtractStringField(json, "speaker_label");
                     if (!string.IsNullOrEmpty(transcript))
                     {
-                        OnTranscript?.Invoke(transcript, endOfTurn);
+                        Debug.Log($"AssemblyAiStreamingSpeechToText: transcript ({(endOfTurn ? "final" : "partial")}, speaker {speakerLabel ?? "?"}): {transcript}");
+                        OnTranscript?.Invoke(transcript, speakerLabel, endOfTurn);
                     }
                     break;
                 case "Begin":
@@ -170,6 +182,15 @@ namespace HackTheNorth.Speech
                     break;
                 case "Termination":
                     Debug.Log("AssemblyAiStreamingSpeechToText: session terminated by server.");
+                    break;
+                case "SpeechStarted":
+                    // Expected, frequent (fires per detected utterance) — not worth a warning.
+                    break;
+                case "Error":
+                    Debug.LogError($"AssemblyAiStreamingSpeechToText: server error: {json}");
+                    break;
+                default:
+                    Debug.LogWarning($"AssemblyAiStreamingSpeechToText: unhandled message type '{type}': {json}");
                     break;
             }
         }
@@ -186,27 +207,70 @@ namespace HackTheNorth.Speech
             return match.Success && match.Groups[1].Value == "true";
         }
 
+        // ClientWebSocket.SendAsync is NOT reentrant — calling it again before the previous call
+        // completes throws "There is already one outstanding 'SendAsync' call for this
+        // WebSocket instance". SubmitAudio is invoked once per MicCapture frame (many times a
+        // second); without serializing sends here, most of those calls would throw and their
+        // audio would silently never reach AssemblyAI (the exception is only logged, easy to
+        // miss, and this pipeline's own logging has proven unreliable to observe via tooling —
+        // this bug produced a live "connected + session began, but zero transcripts ever" fault
+        // caught by end-to-end testing, not by inspection).
+        private readonly SemaphoreSlim sendLock = new(1, 1);
+        private bool loggedFirstAudioFrame;
+        private int framesSent;
+
+        // AssemblyAI rejects any single binary frame outside 50-1000ms of audio (confirmed live:
+        // error_code 3007 "Input Duration Violation" for a 2050ms frame — MicCapture's raw
+        // per-Update() chunk sizes don't respect this at all, so audio must be re-buffered into
+        // properly-sized chunks here rather than forwarded as-is. 50ms (their actual minimum,
+        // not the 100ms originally used) trades a little more per-message overhead for half the
+        // client-side buffering latency — matters since real-time responsiveness was an explicit
+        // requirement and this delay stacks with everything downstream (LLM call, etc.).
+        private const int TargetChunkMs = 50;
+        private readonly List<byte> pendingAudio = new();
+        private int TargetChunkBytes => sampleRate * 2 * TargetChunkMs / 1000; // 16-bit mono
+
         public void SubmitAudio(float[] samples, int sampleRateArg)
         {
+            if (!loggedFirstAudioFrame)
+            {
+                loggedFirstAudioFrame = true;
+                Debug.Log($"AssemblyAiStreamingSpeechToText: SubmitAudio reached (socket null: {socket == null}, state: {socket?.State}, samples: {samples.Length}).");
+            }
+            framesSent++;
+
             if (socket == null || socket.State != WebSocketState.Open) return;
             if (sampleRateArg != sampleRate)
             {
                 Debug.LogWarning($"AssemblyAiStreamingSpeechToText: incoming sample rate ({sampleRateArg}) doesn't match the connection's sample_rate ({sampleRate}) — set MicCapture's sampleRate to {sampleRate} or audio will sound wrong to the STT.");
             }
 
-            byte[] pcm16 = FloatToPcm16(samples);
-            _ = SendAsync(pcm16);
+            pendingAudio.AddRange(FloatToPcm16(samples));
+
+            int targetBytes = TargetChunkBytes;
+            while (pendingAudio.Count >= targetBytes)
+            {
+                byte[] chunk = pendingAudio.GetRange(0, targetBytes).ToArray();
+                pendingAudio.RemoveRange(0, targetBytes);
+                _ = SendAsync(chunk);
+            }
         }
 
         private async Task SendAsync(byte[] data)
         {
+            await sendLock.WaitAsync();
             try
             {
+                if (socket == null || socket.State != WebSocketState.Open) return;
                 await socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, cts?.Token ?? CancellationToken.None);
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"AssemblyAiStreamingSpeechToText: send failed: {e.Message}");
+            }
+            finally
+            {
+                sendLock.Release();
             }
         }
 

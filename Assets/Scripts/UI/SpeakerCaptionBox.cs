@@ -14,7 +14,9 @@ namespace HackTheNorth.UI
         /// <summary>Offset rotates with the target — right for a HUD box hovering near the wearer's head.</summary>
         HeadRelative,
         /// <summary>Offset stays fixed in world space — right for a box anchored to a tracked real-world object, which has no meaningful "forward."</summary>
-        WorldOffset
+        WorldOffset,
+        /// <summary>Parented directly to the camera — a fixed HUD element (e.g. top-right corner) that never lags or swims as the wearer turns their head.</summary>
+        HudLocked
     }
 
     [RequireComponent(typeof(CanvasGroup))]
@@ -44,6 +46,7 @@ namespace HackTheNorth.UI
         private Vector3 velocity;
         private Coroutine fadeRoutine;
         private Coroutine autoHideRoutine;
+        private bool hudParented;
 
         private void Awake()
         {
@@ -62,6 +65,21 @@ namespace HackTheNorth.UI
             {
                 if (Camera.main == null) return;
                 followTarget = Camera.main.transform;
+            }
+
+            if (anchorMode == CaptionAnchorMode.HudLocked)
+            {
+                // Parent-lock instead of per-frame smoothing: a HUD element that trails the
+                // head (even slightly) reads as broken, not "smooth" — real corner overlays
+                // (e.g. Cluely-style) are rigidly fixed to the view.
+                if (!hudParented)
+                {
+                    transform.SetParent(followTarget, worldPositionStays: false);
+                    transform.localPosition = localOffset;
+                    transform.localRotation = Quaternion.identity;
+                    hudParented = true;
+                }
+                return;
             }
 
             Vector3 desiredPosition = anchorMode == CaptionAnchorMode.WorldOffset
